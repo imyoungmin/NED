@@ -50,6 +50,7 @@ def tokenize( text ):
 	:return: List of tokens.
 	"""
 	sentences = text.split( "\n" )
+	tokens = []
 	for sentence in sentences:
 		s = sentence.strip()
 		if s == "":
@@ -58,16 +59,16 @@ def tokenize( text ):
 		words = re.split( r"\s+", s )
 		i = 0
 		while i < len( words ):				# Now split words from non-empty sentences.
-			m = re.match( r"^([\"\'()\[\]$:;,/%])(.+)$", words[i] )			# Remove punctuation from start of word.
-			if m and re.match( r"^\'[dsm]$", words[i], re.I ) is None and re.match( r"^\'re$", words[i], re.I ) is None and re.match( r"^\'ve$", words[i], re.I ) is None and re.match( r"^\'ll$", words[i], re.I ) is None:
+			m = re.match( r"^([\"'()\[\]$:;,/%])(.+)$", words[i] )			# Remove punctuation from start of word.
+			if m and re.match( r"^'[dsm]$", words[i], re.I ) is None and re.match( r"^'re$", words[i], re.I ) is None and re.match( r"^'ve$", words[i], re.I ) is None and re.match( r"^'ll$", words[i], re.I ) is None:
 				words = splice( words, i, 1, [m.group(1), m.group(2)] )
 				i += 1
 			else:
-				m = re.match( r"^(.+)([?!.])([\"\'])$", words[i] )			# Remove sentence breaking punctuation with quote from end of word.
+				m = re.match( r"^(.+)([?!.])([\"'])$", words[i] )			# Remove sentence breaking punctuation with quote from end of word.
 				if m:
 					words = splice( words, i, 1, [m.group(1), m.group(2) + m.group(3), "\n"] )
 				else:
-					m = re.match( r"^(.+)([:;,\"\')(\[\]%])$", words[i] )	# Remove non-sentence-breaking punctuation from end of word.
+					m = re.match( r"^(.+)([:;,\"')(\[\]%])$", words[i] )	# Remove non-sentence-breaking punctuation from end of word.
 					if m:
 						words = splice( words, i, 1, [m.group(1), m.group(2)] )
 					else:
@@ -143,11 +144,13 @@ def tokenize( text ):
 		if words[len( words ) - 1] != "\n":
 			words = words + ["\n"]				# Add new line at the end of the token list.
 		line = " ".join( words )
-		line = re.sub( r" ([?!.]) \n ([\"\']) ", r" \1 \2 \n ", line )
+		line = re.sub( r" ([?!.]) \n ([\"']) ", r" \1 \2 \n ", line )
 		line = re.sub( r" *\n *", r"\n", line )
 
 		# Print every word on a separate line.
 		line = re.sub( r" +", r" ", line )
-		line = re.sub( r"\n", r"\n\n", line )
-		line = re.sub( r" ", r"\n", line )
-		print( line, end="" )
+#		line = re.sub( r"\n", r"\n\n", line )
+#		line = re.sub( r" ", r"\n", line )
+		tokens += line.split()
+
+	return tokens
