@@ -17,7 +17,7 @@ _SPORTS = {
 }
 
 
-def splice( l, offset, count, el ):
+def _splice( l, offset, count, el ):
 	"""
 	Insert a list of elements in a given position of a list after removing a given number of previous elements.
 	:param l: Source list.
@@ -29,18 +29,31 @@ def splice( l, offset, count, el ):
 	return l[:offset] + el + l[(offset + count):]
 
 
-def abbrev( word ):
+def _abbrev( word ):
 	"""
 	Check if a word is an abbreviature.
 	:param word: Word to check.
 	:return: True if abbreviature, false otherwise.
 	"""
 	word = word.lower()
-	if re.match( r"\.", word ) and re.match( r"\d", word ) is None:
+	if re.search( r"\.", word ) and re.search( r"\d", word ) is None:
 		return True
 	if re.match( r"^[a-z]$", word ):
 		return True
 	return bool( _ABBREV.get( word ) )
+
+
+def processTokens( tokens, dictionary ):
+	"""
+	Curate and count frequencies of unique tokens.
+	:param tokens: List of tokens to curate and count.
+	:param dictionary: Output dictionary (function update contents of existing data).
+	"""
+	for token in tokens:
+		if re.match( r"^\W+$", token ) is None:				# Skip patterns like ... #
+			if dictionary.get( token ) is None:
+				dictionary[token] = 0						# Create token in dictionary if it doesn't exist.
+			dictionary[token] += 1
 
 
 def tokenize( text ):
@@ -61,84 +74,84 @@ def tokenize( text ):
 		while i < len( words ):				# Now split words from non-empty sentences.
 			m = re.match( r"^([\"'()\[\]$:;,/%])(.+)$", words[i] )			# Remove punctuation from start of word.
 			if m and re.match( r"^'[dsm]$", words[i], re.I ) is None and re.match( r"^'re$", words[i], re.I ) is None and re.match( r"^'ve$", words[i], re.I ) is None and re.match( r"^'ll$", words[i], re.I ) is None:
-				words = splice( words, i, 1, [m.group(1), m.group(2)] )
+				words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 				i += 1
 			else:
 				m = re.match( r"^(.+)([?!.])([\"'])$", words[i] )			# Remove sentence breaking punctuation with quote from end of word.
 				if m:
-					words = splice( words, i, 1, [m.group(1), m.group(2) + m.group(3), "\n"] )
+					words = _splice( words, i, 1, [m.group(1), m.group(2) + m.group(3), "\n"] )
 				else:
 					m = re.match( r"^(.+)([:;,\"')(\[\]%])$", words[i] )	# Remove non-sentence-breaking punctuation from end of word.
 					if m:
-						words = splice( words, i, 1, [m.group(1), m.group(2)] )
+						words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 					else:
 						m = re.match( r"^(.+)([?!])$", words[i] )			# Remove sentence-breaking punctuation (not period) from end of word.
 						if m is None:
 							m = re.match( r"^(.+[^.])(\.\.+)$", words[i] )
 						if m:
-							words = splice( words, i, 1, [m.group(1), m.group(2), "\n"] )
+							words = _splice( words, i, 1, [m.group(1), m.group(2), "\n"] )
 						else:
 							m = re.match( r"^([a-z]+\$)(.+)$", words[i], re.I )		# Separate currency symbol from value.
 							if m:
-								words = splice( words, i, 1, [m.group(1), m.group(2)] )
+								words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 								i += 1
 							else:
 								m = re.match( r"^(.*)-\$(.*)$", words[i], re.I )	# Separate currency symbol from other symbols.
 								if m:
-									words = splice( words, i, 1, [m.group(1), "-", "\$", m.group(2)] )
+									words = _splice( words, i, 1, [m.group(1), "-", "\$", m.group(2)] )
 									i += 1
 								else:
 									m = re.match( r"^(.+)('re|'ve|'ll|n't|'[dsm])$", words[i], re.I )			# Split words like we're did't etcetera.
 									if m:
-										words = splice( words, i, 1, [m.group(1), m.group(2)] )
+										words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 									else:
 										m = re.match( r"^(.*[a-z].*)([\",()])(.*[a-z].*)$", words[i], re.I )	# Split words with punctuation in the middle.
 										if m:
-											words = splice( words, i, 1, [m.group(1), m.group(2), m.group(3)] )
+											words = _splice( words, i, 1, [m.group(1), m.group(2), m.group(3)] )
 										else:
 											m = re.match( r"^(.*[^.])(\.\.+)([^.].*)$", words[i] )				# Separate words linked with sequence (>=2) of periods.
 											if m:
-												words = splice( words, i, 1, [m.group(1) + m.group(2), m.group(3)] )
+												words = _splice( words, i, 1, [m.group(1) + m.group(2), m.group(3)] )
 											else:
 												m = re.match( r"^(-+)([^\-].*)$", words[i] )					# Remove initial hyphens from word.
 												if m:
-													words = splice( words, i, 1, [m.group(1), m.group(2)] )
+													words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 												else:
 													m = re.match( r"^([A-Za-z]+)-(.*)$", words[i] )				# Separate sport types and first words in article titles.
 													if m and _SPORTS.get( m.group(1) ):
-														words = splice( words, i, 1, [m.group(1), "-", m.group(2)] )
+														words = _splice( words, i, 1, [m.group(1), "-", m.group(2)] )
 													else:
 														m = re.match( r"^([0-9/]+)-([A-Z][a-z].*)$", words[i] )				# Separate number and word linked with hyphen.
 														if m:
-															words = splice( words, i, 1, [m.group(1), "-", m.group(2)] )
+															words = _splice( words, i, 1, [m.group(1), "-", m.group(2)] )
 														else:
 															m = re.match( r"^([0-9/]+)\.([A-Z][a-z].*)$", words[i] )		# Separate number and word linked with period.
 															if m:
-																words = splice( words, i, 1, [m.group(1) + ".", m.group(2)] )
+																words = _splice( words, i, 1, [m.group(1) + ".", m.group(2)] )
 															else:
 																m = re.match( r"^(.*)\.-([A-Z][a-z].*)$", words[i] ) 		# Separate number and word linked with period.
 																if m:
-																	words = splice( words, i, 1, [m.group(1) + ".", "-", m.group(2)] )
+																	words = _splice( words, i, 1, [m.group(1) + ".", "-", m.group(2)] )
 																else:
 																	m = re.match( r"^([A-Z]\.)([A-Z][a-z].*)$", words[i] )	# Separate initial from name.
 																	if m:
-																		words = splice( words, i, 1, [m.group(1), m.group(2)] )
+																		words = _splice( words, i, 1, [m.group(1), m.group(2)] )
 																	else:
 																		m = re.match( r"^(.*[0-9])(\.)$", words[i] )		# Introduce sentence break after number followed by period.
 																		if i != 0 and m:
-																			words = splice( words, i, 1, [ m.group(1), m.group(2), "\n"] )
+																			words = _splice( words, i, 1, [ m.group(1), m.group(2), "\n"] )
 																		else:
 																			m = re.match( r"^(.+)/(.+)$", words[i] )		# Split words containing a slash if they are not a URI.
-																			if re.match( r"^(ht|f)tps*", words[i], re.I ) is None and re.match( r"[^0-9/\-]", words[i] ) and m:
-																				words = splice( words, i, 1, [m.group(1), "/", m.group(2)] )
+																			if re.match( r"^(ht|f)tps*", words[i], re.I ) is None and re.search( r"[^0-9/\-]", words[i] ) and m:
+																				words = _splice( words, i, 1, [m.group(1), "/", m.group(2)] )
 																			else:
 																				m = re.match( r"^(.+)(\.)$", words[i] )		# Put sentence break after period if it is not an abbreviation.
 																				if m and re.match( r"^\.+$", words[i] ) is None and re.match( r"^[0-9]+\.", words[i] ) is None:
 																					word = m.group(1)
-																					if i != len( words ) - 1 and abbrev( word ):
+																					if i != len( words ) - 1 and _abbrev( word ):
 																						i += 1
 																					else:
-																						words = splice( words, i, 1, [m.group(1), m.group(2), "\n"] )
+																						words = _splice( words, i, 1, [m.group(1), m.group(2), "\n"] )
 																				else:
 																					i += 1
 		if words[len( words ) - 1] != "\n":
