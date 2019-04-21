@@ -43,19 +43,6 @@ def _abbrev( word ):
 	return bool( _ABBREV.get( word ) )
 
 
-def processTokens( tokens, dictionary ):
-	"""
-	Curate and count frequencies of unique tokens.
-	:param tokens: List of tokens to curate and count.
-	:param dictionary: Output dictionary (function update contents of existing data).
-	"""
-	for token in tokens:
-		if re.match( r"^\W+$", token ) is None:				# Skip patterns like ... #
-			if dictionary.get( token ) is None:
-				dictionary[token] = 0						# Create token in dictionary if it doesn't exist.
-			dictionary[token] += 1
-
-
 def tokenize( text ):
 	"""
 	Tokenize text according to CoNLL 2003 standards.

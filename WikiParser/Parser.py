@@ -2,6 +2,8 @@ import bz2
 import os
 import re
 import sys
+import time
+from nltk.corpus import stopwords
 import Tokenizer
 
 _ROOT = "/Volumes/YoungMinEXT/"															# The root directory of the Wikipedia files.
@@ -20,10 +22,13 @@ _DocStartPattern = re.compile( r"^<doc.+?id=\"(\d+)\".+?title=\"\s*(.+)\s*\".*?>
 _DisambiguationPattern = re.compile( r"^(.+)\s+\(disambiguation\)$", re.I )						# Disambiguation title pattern.
 _ExternalLinkPattern = re.compile( r"<a.*?href=['\"]((" + r"|".join( _UrlProtocols ) + r")%3A|//).*?>\s*(.+?)\s*</a>", re.I )	# None Wikilinks.
 _LinkPattern = re.compile( r"<a.*?href=\"\s*(.+?)\s*\".*?>\s*(.+?)\s*</a>", re.I )				# Links: internals and externals.
+_PunctuationOnlyPattern = re.compile( r"^\W+$" )
 
-# Undesired tags.
+# Undesired tags to remove *before* tokenizing text.
 _undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>"]
 
+# Stop words set: use nltk.download('stopwords').  Then add: "n't".
+_stopWords = set( stopwords.words( "english" ) )
 
 def buildTFIDFDictionary():
 
@@ -31,17 +36,19 @@ def buildTFIDFDictionary():
 	for directory in directories:
 		fullDir = _Extracted_XML + directory
 		if os.path.isdir( fullDir ):
-			print( "[*] Entering", directory )
+			print( "[*] Processing", directory )
 			files = os.listdir( fullDir )						# Get all files in current parsing directory, e.g. AA/wiki_00.bz2.
 			for file in files:
 				fullFile = fullDir + "/" + file
 				if os.path.isfile( fullFile ) and _FilenamePattern.match( file ):
 
 					# Read bz2 file and process it.
+					startTime = time.time()
 					with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
 						_tokenizeWikiPagesFromBZ2( bz2File.readlines() )
+					endTime = time.time()
 
-					print( "[**] Done with", file )
+					print( "[**] Done with", file, ":", endTime - startTime )
 
 
 def _tokenizeWikiPagesFromBZ2( lines ):
@@ -78,21 +85,33 @@ def _tokenizeWikiPagesFromBZ2( lines ):
 				if not isDisambiguation:
 					documents += [doc]  # Add extracted document to list for further processing in caller function.
 					print( "Done!" )
-					# TODO: Curate document tokens (i.e. get frequencies).
 				extractingContents = False
 				isDisambiguation = False
-				break				# TODO: To stop at the first document.
 			elif not isDisambiguation:									# Process text within <doc></doc> for non disambiguation pages
-				# Remove undesired tags.
-				for tag in _undesiredTags:
+				for tag in _undesiredTags:								# Remove undesired tags.
 					line = line.replace( tag, "" )
+
 #				_ExternalLinkPattern.sub( r"\3", line )					# Replace external links for their anchor texts.  (No interwiki links affected).
 				line = _LinkPattern.sub( r"\2", line )					# Replace all links with their anchor text.
-				tokens = Tokenizer.tokenize( line.lower() )				# Tokenize a lower-cased version of read line.
-				Tokenizer.processTokens( tokens, doc["tokens"] )		# Update dictionary of tokens and frequencies.
+				_tokenizeSentence( line, doc["tokens"] )				# Update dictionary of tokens and frequencies.
 
 	return documents
 
+
+def _tokenizeSentence( sentence, dictionary ):
+	"""
+	Curate and count frequencies of unique tokens.
+	:param sentence: Line of text to tokenize and process.
+	:param dictionary: Output dictionary (function update contents of existing data).
+	"""
+	tokens = Tokenizer.tokenize( sentence.lower() )  		# Tokenize a lower-cased version of read line.
+	tokens = [w for w in tokens if not w in _stopWords ]  	# Remove stop words.
+
+	for token in tokens:
+		if _PunctuationOnlyPattern.match( token ) is None:	# Skip patterns like ... #
+			if dictionary.get( token ) is None:
+				dictionary[token] = 0						# Create token in dictionary if it doesn't exist.
+			dictionary[token] += 1
 
 
 def go():
