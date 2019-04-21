@@ -1,3 +1,4 @@
+import importlib
 import bz2
 import os
 import re
@@ -5,6 +6,8 @@ import sys
 import time
 from nltk.corpus import stopwords
 import Tokenizer
+importlib.reload( Tokenizer )
+
 
 _ROOT = "/Volumes/YoungMinEXT/"															# The root directory of the Wikipedia files.
 _Multistream_Index = _ROOT + "enwiki-20141106-pages-articles-multistream-index.txt"		# Use the multistream Wikipedia dump to save space.

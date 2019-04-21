@@ -1,7 +1,5 @@
 import importlib
-import Tokenizer
 import WikiParser.Parser as Parser
-importlib.reload( Tokenizer )
 importlib.reload( Parser )
 
 # with open( "Datasets/tokenizerTest.txt" ) as file:
