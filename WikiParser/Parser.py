@@ -6,10 +6,12 @@ import sys
 import time
 from multiprocessing import Pool
 from nltk.corpus import stopwords
+import pymongo
+from pymongo import MongoClient
 import Tokenizer
 importlib.reload( Tokenizer )
 
-
+# File locations.
 _ROOT = "/Volumes/YoungMinEXT/"															# The root directory of the Wikipedia files.
 _Multistream_Index = _ROOT + "enwiki-20141106-pages-articles-multistream-index.txt"		# Use the multistream Wikipedia dump to save space.
 _Multistream_Dump = _ROOT + "enwiki-20141106-pages-articles-multistream.xml.bz2"
@@ -34,12 +36,20 @@ _undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>"]
 # Stop words set: use nltk.download('stopwords').  Then add: "n't".
 _stopWords = set( stopwords.words( "english" ) )
 
+# MongoDB connection and collection variables.
+_mClient = MongoClient( "mongodb://localhost:27017/" )
+_mNED = _mClient.ned											# Connection to DB 'ned'.
+_mIdf_Dictionary = _mNED["idf_dictionary"]						# {_id:str, idf:float}.
+_mEntity_ID = _mNED["entity_id"]								# {_id:int, e:str}.
+
 
 def buildTFIDFDictionary():
 	"""
 	Build the TF-IDF dictionary by tokenizing non-disambiguation
-	:return:
 	"""
+
+	_initDBCollections()
+
 	directories = os.listdir( _Extracted_XML )					# Get directories of the form AA, AB, AC, etc.
 	for directory in directories:
 		fullDir = _Extracted_XML + directory
@@ -57,10 +67,18 @@ def buildTFIDFDictionary():
 
 						# Use multithreading to tokenize each extracted document.
 						pool = Pool()
-						results = pool.map( _tokenizeDoc, documents )		# Each document object in its own thread.
+						documents = pool.map( _tokenizeDoc, documents )		# Each document object in its own thread.
 						pool.close()
 						pool.join()											# Close pool and wait for work to finish.
 
+						### Update DB collections ###
+
+						# Insert Wikipedia titles and documents IDs in entity_id collection.
+						bulkEntities = [{"_id": doc["id"], "e": doc["title"]} for doc in documents]
+						result = _mEntity_ID.insert_many( bulkEntities )
+						print( result.inserted_ids )
+
+						# TODO: Upsert term and document frequencies in idf_dictionary collection.
 
 					endTime = time.time()
 
@@ -134,6 +152,20 @@ def _tokenizeDoc( doc ):
 
 	print( "[***]", doc["title"], "... Done!" )
 	return nDoc
+
+
+def _initDBCollections():
+	"""
+	Reset the DB collections to start afresh.
+	"""
+	_mIdf_Dictionary.drop()
+	_mEntity_ID.drop()
+
+	# Create indices on (re)created collections.
+	_mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
+
+	print( "[!] Collections have been dropped")
+
 
 
 def go():
