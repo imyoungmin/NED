@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+from multiprocessing import Pool
 from nltk.corpus import stopwords
 import Tokenizer
 importlib.reload( Tokenizer )
@@ -33,8 +34,12 @@ _undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>"]
 # Stop words set: use nltk.download('stopwords').  Then add: "n't".
 _stopWords = set( stopwords.words( "english" ) )
 
-def buildTFIDFDictionary():
 
+def buildTFIDFDictionary():
+	"""
+	Build the TF-IDF dictionary by tokenizing non-disambiguation
+	:return:
+	"""
 	directories = os.listdir( _Extracted_XML )					# Get directories of the form AA, AB, AC, etc.
 	for directory in directories:
 		fullDir = _Extracted_XML + directory
@@ -48,17 +53,25 @@ def buildTFIDFDictionary():
 					# Read bz2 file and process it.
 					startTime = time.time()
 					with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
-						_tokenizeWikiPagesFromBZ2( bz2File.readlines() )
+						documents = _extractWikiPagesFromBZ2( bz2File.readlines() )
+
+						# Use multithreading to tokenize each extracted document.
+						pool = Pool()
+						results = pool.map( _tokenizeDoc, documents )		# Each document object in its own thread.
+						pool.close()
+						pool.join()											# Close pool and wait for work to finish.
+
+
 					endTime = time.time()
 
 					print( "[**] Done with", file, ":", endTime - startTime )
 
 
-def _tokenizeWikiPagesFromBZ2( lines ):
+def _extractWikiPagesFromBZ2( lines ):
 	"""
-	Tokenize non-disambiguation articles from extracted Wikipedia bz2 archives.
+	Extract non-disambiguation articles from extracted Wikipedia bz2 archives.
 	:param lines: A list of sentences.
-	:return: List of document objects: {id:int, title:str, tokens:{token1:freq1, token2:freq2, ...}}.
+	:return: List of document objects: {id:int, title:str, lines:[str]}.
 	"""
 	documents = []												# We collect all documents in a list.
 	doc = {}													# A processed document is a dictionary: {id: x, title: y}
@@ -75,46 +88,52 @@ def _tokenizeWikiPagesFromBZ2( lines ):
 				if md:
 					isDisambiguation = True
 					print( "[***] Skipping", m.group(2) )				# Skipping disambiguation pages.
-				else:
-					print( "[***]", m.group(2), "...", end="" )
+
 				doc = { "id": int(m.group(1)), 							# A new dictionary for this document.
 					    "title": m.group( 2 ),
-						"tokens": {}}									# Dictionary of curated/unique tokens with frequencies.
+						"lines": [] }
 				extractingContents = True								# Turn on the flag: we started reading a document.
 			else:
 				print( "Line:", line, "is not in any document!", file=sys.stderr )
 		else:
 			if line == "</doc>":
 				if not isDisambiguation:
-					documents += [doc]  # Add extracted document to list for further processing in caller function.
-					print( "Done!" )
+					documents += [doc]  								# Add extracted document to list for further processing in caller function.
 				extractingContents = False
 				isDisambiguation = False
 			elif not isDisambiguation:									# Process text within <doc></doc> for non disambiguation pages
-				for tag in _undesiredTags:								# Remove undesired tags.
-					line = line.replace( tag, "" )
-
 #				_ExternalLinkPattern.sub( r"\3", line )					# Replace external links for their anchor texts.  (No interwiki links affected).
-				line = _LinkPattern.sub( r"\2", line )					# Replace all links with their anchor text.
-				_tokenizeSentence( line, doc["tokens"] )				# Update dictionary of tokens and frequencies.
+				doc["lines"].append( line.lower() )						# Add (lowercase) line of text for multithreading.
 
 	return documents
 
 
-def _tokenizeSentence( sentence, dictionary ):
+def _tokenizeDoc( doc ):
 	"""
-	Curate and count frequencies of unique tokens.
-	:param sentence: Line of text to tokenize and process.
-	:param dictionary: Output dictionary (function update contents of existing data).
+	Tokenize a document object.
+	:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
+	:return: A dictionary of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
 	"""
-	tokens = Tokenizer.tokenize( sentence.lower() )  		# Tokenize a lower-cased version of read line.
-	tokens = [w for w in tokens if not w in _stopWords ]  	# Remove stop words.
+	nDoc = { "id": doc["id"], "title": doc["title"], "tokens": { } }
 
-	for token in tokens:
-		if _PunctuationOnlyPattern.match( token ) is None:	# Skip patterns like ... #
-			if dictionary.get( token ) is None:
-				dictionary[token] = 0						# Create token in dictionary if it doesn't exist.
-			dictionary[token] += 1
+	for line in doc["lines"]:
+		for tag in _undesiredTags:  									# Remove undesired tags.
+			line = line.replace( tag, "" )
+
+		line = _LinkPattern.sub( r"\2", line )  # Replace all links with their anchor text.
+
+		tokens = Tokenizer.tokenize( line )  							# Tokenize a lower-cased version of article text.
+		tokens = [w for w in tokens if not w in _stopWords ]  			# Remove stop words.
+
+		for token in tokens:
+			if _PunctuationOnlyPattern.match( token ) is None:			# Skip patterns like ... #
+				if nDoc["tokens"].get( token ) is None:
+					nDoc["tokens"][token] = 1							# Create token in dictionary if it doesn't exist.
+				else:
+					nDoc["tokens"][token] += 1
+
+	print( "[***]", doc["title"], "... Done!" )
+	return nDoc
 
 
 def go():
