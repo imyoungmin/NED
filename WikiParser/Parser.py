@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+import math
 from multiprocessing import Pool
 from nltk.corpus import stopwords
 import pymongo
@@ -85,7 +86,33 @@ def buildTFIDFDictionary():
 					endTime = time.time()
 					print( "[**] Done with", file, ":", endTime - startTime )
 
+	# Compute IDF and update term weights in all of the documents.
+	_computeIDFFromDocumentFrequencies()
+
 	print( "[!] Total number of entities:", _nEntities )
+
+
+def _computeIDFFromDocumentFrequencies():
+	"""
+	Use the document frequencies stored in the idf_dictionary collection to calculate log(N/(df_t + 1)).
+	"""
+	global _nEntities
+	startTime = time.time()
+	LOG_N = math.log( _nEntities )
+
+	print( "[!] Computing IDF from document frequencies... ", end="" )
+	requests = []														# We'll use bulk writes to speed up process.
+	for t in _mIdf_Dictionary.find():
+		requests.append( pymongo.UpdateOne( {"_id": t["_id"]}, {"$set": {"idf": LOG_N - math.log( t["idf"] + 1.0 )}} ) )
+		if len( requests ) == 10000:									# Send lots of update requests.
+			_mIdf_Dictionary.bulk_write( requests )
+			requests = []
+
+	if requests:
+		_mIdf_Dictionary.bulk_write( requests )							# Process remaining requests.
+
+	endTime = time.time()
+	print( "Done!", endTime - startTime )
 
 
 def _updateTFIDFCollections( documents ):
