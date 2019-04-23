@@ -33,7 +33,7 @@ _PunctuationOnlyPattern = re.compile( r"^\W+$" )
 # Undesired tags to remove *before* tokenizing text.
 _undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>"]
 
-# Stop words set: use nltk.download('stopwords').  Then add: "n't".
+# Stop words set: use nltk.download('stopwords').  Then add: "n't" and "'s".
 _stopWords = set( stopwords.words( "english" ) )
 
 # MongoDB connection and collection variables.
@@ -42,13 +42,18 @@ _mNED = _mClient.ned											# Connection to DB 'ned'.
 _mIdf_Dictionary = _mNED["idf_dictionary"]						# {_id:str, idf:float}.
 _mEntity_ID = _mNED["entity_id"]								# {_id:int, e:str}.
 
+# Total number of tokenized documents (used for IDF).
+_nEntities = 0
+
 
 def buildTFIDFDictionary():
 	"""
 	Build the TF-IDF dictionary by tokenizing non-disambiguation
 	"""
+	global _nEntities
 
 	_initDBCollections()
+	_nEntities = 0
 
 	directories = os.listdir( _Extracted_XML )					# Get directories of the form AA, AB, AC, etc.
 	for directory in directories:
@@ -65,24 +70,48 @@ def buildTFIDFDictionary():
 					with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
 						documents = _extractWikiPagesFromBZ2( bz2File.readlines() )
 
-						# Use multithreading to tokenize each extracted document.
-						pool = Pool()
-						documents = pool.map( _tokenizeDoc, documents )		# Each document object in its own thread.
-						pool.close()
-						pool.join()											# Close pool and wait for work to finish.
+					_nEntities += len( documents )
 
-						### Update DB collections ###
+					# Use multithreading to tokenize each extracted document.
+					pool = Pool()
+					documents = pool.map( _tokenizeDoc, documents )		# Each document object in its own thread.
+					pool.close()
+					pool.join()											# Close pool and wait for work to finish.
 
-						# Insert Wikipedia titles and documents IDs in entity_id collection.
-						bulkEntities = [{"_id": doc["id"], "e": doc["title"]} for doc in documents]
-						result = _mEntity_ID.insert_many( bulkEntities )
-						print( result.inserted_ids )
-
-						# TODO: Upsert term and document frequencies in idf_dictionary collection.
+					# Update DB collections.
+					_updateTFIDFCollections( documents )
 
 					endTime = time.time()
-
 					print( "[**] Done with", file, ":", endTime - startTime )
+
+	print( "[!] Total number of entities:", _nEntities )
+
+
+def _updateTFIDFCollections( documents ):
+	"""
+	Write collections related to TF-IDF computations.
+	:param documents: A list of dictionaries of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
+	"""
+	# Insert Wikipedia titles and documents IDs in entity_id collection.
+	bulkEntities = [{ "_id": doc["id"], "e": doc["title"] } for doc in documents]
+	_mEntity_ID.insert_many( bulkEntities )
+
+	# Upsert terms and document frequencies in idf_dictionary collection.
+	for doc in documents:
+		s = set( doc["tokens"] )  							# Set of terms to upsert.
+		existentTerms = _mIdf_Dictionary.find( { "_id": { "$in": list( s ) } } )
+		toUpdate = []  										# List of term documents IDs to update.
+		for t in existentTerms:
+			toUpdate.append( t["_id"] )
+			s.remove( t["_id"] )
+
+		if s:  												# Insert new term documents if there are terms left in set.
+			toInsert = [{ "_id": t, "idf": 1 } for t in s]  # List of new term documents to bulk-insert in collection.
+			_mIdf_Dictionary.insert_many( toInsert )
+
+		if toUpdate:
+			_mIdf_Dictionary.update_many( { "_id": { "$in": toUpdate } }, {
+				"$inc": { "idf": +1.0 } } )  				# Basically increase by one the term document frequency.
 
 
 def _extractWikiPagesFromBZ2( lines ):
