@@ -41,6 +41,7 @@ _mClient = MongoClient( "mongodb://localhost:27017/" )
 _mNED = _mClient.ned											# Connection to DB 'ned'.
 _mIdf_Dictionary = _mNED["idf_dictionary"]						# {_id:str, idf:float}.
 _mEntity_ID = _mNED["entity_id"]								# {_id:int, e:str}.
+_mTf_Documents = _mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn], n:float}.
 
 # Total number of tokenized documents (used for IDF).
 _nEntities = 0
@@ -112,6 +113,18 @@ def _updateTFIDFCollections( documents ):
 		if toUpdate:
 			_mIdf_Dictionary.update_many( { "_id": { "$in": toUpdate } }, {
 				"$inc": { "idf": +1.0 } } )  				# Basically increase by one the term document frequency.
+
+	# Bulk insertion of term frequencies for each parsed document.
+	ds = []
+	for doc in documents:
+		terms = []
+		weights = []
+		for t in doc["tokens"]:
+			terms.append( t )								# One array with terms, and another with weights (for now, frequencies).
+			weights.append( doc["tokens"][t] )
+		ds.append( {"_id": doc["id"], "t": terms, "w": weights, "n": -1.0} )
+
+	_mTf_Documents.insert_many( ds )						# A -1 in "n" indicates the term weights "w" are just frequencies.
 
 
 def _extractWikiPagesFromBZ2( lines ):
@@ -188,6 +201,7 @@ def _initDBCollections():
 	Reset the DB collections to start afresh.
 	"""
 	_mIdf_Dictionary.drop()
+	_mTf_Documents.drop()
 	_mEntity_ID.drop()
 
 	# Create indices on (re)created collections.
