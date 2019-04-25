@@ -207,6 +207,7 @@ def _tokenizeDoc( doc ):
 	"""
 	nDoc = { "id": doc["id"], "title": doc["title"], "tokens": { } }
 
+	maxFreq = 0
 	for line in doc["lines"]:
 		for tag in _undesiredTags:  									# Remove undesired tags.
 			line = line.replace( tag, "" )
@@ -218,13 +219,22 @@ def _tokenizeDoc( doc ):
 
 		for token in tokens:
 			if _PunctuationOnlyPattern.match( token ) is None:				# Skip patterns like '...' and '#' and '--'
-				token = _porterStemmer.stem( token, 0, len( token ) - 1 )	# Stem token.
-				if nDoc["tokens"].get( token ) is None:
-					nDoc["tokens"][token] = 1								# Create token in dictionary if it doesn't exist.
+				t = _porterStemmer.stem( token, 0, len( token ) - 1 )		# Stem token.
+				if nDoc["tokens"].get( t ) is None:
+					nDoc["tokens"][t] = 1									# Create token in dictionary if it doesn't exist.
 				else:
-					nDoc["tokens"][token] += 1
+					nDoc["tokens"][t] += 1
+				maxFreq = max( nDoc["tokens"][t], maxFreq )					# Keep track of maximum term frequency within document.
 
-	print( "[***]", doc["title"], "... Done!" )
+	# Normalize frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
+	if maxFreq == 0:
+		print( "Empty document!", nDoc, file=sys.stderr )
+		sys.exit( 1 )
+
+	for token in nDoc["tokens"]:
+		nDoc["tokens"][token] = 0.5 + 0.5 * nDoc["tokens"][token] / maxFreq
+
+	print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
 	return nDoc
 
 
