@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import math
+import PorterStemmer as PS
 from multiprocessing import Pool
 from nltk.corpus import stopwords
 import pymongo
@@ -36,6 +37,9 @@ _undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>"]
 
 # Stop words set: use nltk.download('stopwords').  Then add: "n't" and "'s".
 _stopWords = set( stopwords.words( "english" ) )
+
+# Porter stemmer.
+_porterStemmer = PS.PorterStemmer()
 
 # MongoDB connection and collection variables.
 _mClient = MongoClient( "mongodb://localhost:27017/" )
@@ -207,15 +211,16 @@ def _tokenizeDoc( doc ):
 		for tag in _undesiredTags:  									# Remove undesired tags.
 			line = line.replace( tag, "" )
 
-		line = _LinkPattern.sub( r"\2", line )  # Replace all links with their anchor text.
+		line = _LinkPattern.sub( r"\2", line )  						# Replace all links with their anchor text.
 
 		tokens = Tokenizer.tokenize( line )  							# Tokenize a lower-cased version of article text.
 		tokens = [w for w in tokens if not w in _stopWords ]  			# Remove stop words.
 
 		for token in tokens:
-			if _PunctuationOnlyPattern.match( token ) is None:			# Skip patterns like ... #
+			if _PunctuationOnlyPattern.match( token ) is None:				# Skip patterns like '...' and '#' and '--'
+				token = _porterStemmer.stem( token, 0, len( token ) - 1 )	# Stem token.
 				if nDoc["tokens"].get( token ) is None:
-					nDoc["tokens"][token] = 1							# Create token in dictionary if it doesn't exist.
+					nDoc["tokens"][token] = 1								# Create token in dictionary if it doesn't exist.
 				else:
 					nDoc["tokens"][token] += 1
 
