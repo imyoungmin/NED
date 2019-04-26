@@ -46,7 +46,7 @@ _mClient = MongoClient( "mongodb://localhost:27017/" )
 _mNED = _mClient.ned											# Connection to DB 'ned'.
 _mIdf_Dictionary = _mNED["idf_dictionary"]						# {_id:str, idf:float}.
 _mEntity_ID = _mNED["entity_id"]								# {_id:int, e:str}.
-_mTf_Documents = _mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn], n:float}.
+_mTf_Documents = _mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn]}.
 
 # Total number of tokenized documents (used for IDF).
 _nEntities = 0
@@ -67,6 +67,7 @@ def buildTFIDFDictionary():
 		if os.path.isdir( fullDir ):
 			print( "[*] Processing", directory )
 			files = os.listdir( fullDir )						# Get all files in current parsing directory, e.g. AA/wiki_00.bz2.
+			files.sort()
 			for file in files:
 				fullFile = fullDir + "/" + file
 				if os.path.isfile( fullFile ) and _FilenamePattern.match( file ):
@@ -92,6 +93,7 @@ def buildTFIDFDictionary():
 
 	# Compute IDF and update term weights in all of the documents.
 	_computeIDFFromDocumentFrequencies()
+	_computeAndNormalizeTermWeights()
 
 	print( "[!] Total number of entities:", _nEntities )
 
@@ -104,19 +106,63 @@ def _computeIDFFromDocumentFrequencies():
 	startTime = time.time()
 	LOG_N = math.log( _nEntities )
 
-	print( "[!] Computing IDF from document frequencies... ", end="" )
+	print( "[!] Computing IDF from document frequencies..." )
 	requests = []														# We'll use bulk writes to speed up process.
+	BATCH_SIZE = 10000
+	totalRequests = 0
 	for t in _mIdf_Dictionary.find():
 		requests.append( pymongo.UpdateOne( {"_id": t["_id"]}, {"$set": {"idf": LOG_N - math.log( t["idf"] + 1.0 )}} ) )
-		if len( requests ) == 10000:									# Send lots of update requests.
+		totalRequests += 1
+		if len( requests ) == BATCH_SIZE:								# Send lots of update requests.
 			_mIdf_Dictionary.bulk_write( requests )
+			print( "[*]", totalRequests, "processed" )
 			requests = []
 
 	if requests:
 		_mIdf_Dictionary.bulk_write( requests )							# Process remaining requests.
+		print( "[*]", totalRequests, "processed" )
 
 	endTime = time.time()
-	print( "Done!", endTime - startTime )
+	print( "[!] Done after", endTime - startTime, "secs." )
+
+
+def _computeAndNormalizeTermWeights():
+	"""
+	Compute weights for each entity document's terms by using the formula: [0.5 + 0.5*f(t,d)/MaxFreq(d)]*[log(N/(df_t + 1))].
+	Each factor is already stored in tf_documents and idf_dictionary; so we need to combine them and then normalize the weight.
+	"""
+	startTime = time.time()
+	print( "[!] Computing and normalizing term frequency weights in entity documents... " )
+	requests = []														# We'll use bulk writes to speed up process.
+	BATCH_SIZE = 100
+	totalRequests = 0
+	for e in _mTf_Documents.find():										# For each entity document....
+		idfDict = {}
+		for termIdf in _mIdf_Dictionary.find( {"_id": {"$in": e["t"]}} ):
+			idfDict[termIdf["_id"]] = termIdf["idf"]					# Get the IDF of its terms...
+		weights = []
+		sumW2 = 0.0
+		for i in range( len( e["t"] ) ):								# Multiply each TF by IDF...
+			w = e["w"][i] * idfDict[e["t"][i]]
+			sumW2 += w * w
+			weights.append( w )
+		normFactor = math.sqrt( sumW2 )
+		for i in range( len( e["t"] ) ):								# And normalize weight by document length.
+			weights[i] = weights[i] / normFactor
+
+		requests.append( pymongo.UpdateOne( {"_id": e["_id"]}, {"$set": {"w": weights}} ) )
+		totalRequests += 1
+		if len( requests ) == BATCH_SIZE:								# Send lots of update requests.
+			_mTf_Documents.bulk_write( requests )
+			print( "[*]", totalRequests, "processed" )
+			requests = []
+
+	if requests:														# Process remaining requests.
+		_mTf_Documents.bulk_write( requests )
+		print( "[*]", totalRequests, "processed" )
+
+	endTime = time.time()
+	print( "[!] Done after", endTime - startTime, "secs." )
 
 
 def _updateTFIDFCollections( documents ):
@@ -125,24 +171,24 @@ def _updateTFIDFCollections( documents ):
 	:param documents: A list of dictionaries of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
 	"""
 	# Insert Wikipedia titles and documents IDs in entity_id collection.
+	# This serves the purpose of knowing which entities DO exist in the KB.
 	bulkEntities = [{ "_id": doc["id"], "e": doc["title"] } for doc in documents]
 	_mEntity_ID.insert_many( bulkEntities )
 
 	# Upsert terms and document frequencies in idf_dictionary collection.
 	for doc in documents:
 		s = set( doc["tokens"] )  							# Set of terms to upsert.
-		existentTerms = _mIdf_Dictionary.find( { "_id": { "$in": list( s ) } } )
-		toUpdate = []  										# List of term documents IDs to update.
-		for t in existentTerms:
-			toUpdate.append( t["_id"] )
+		toUpdate = set()  									# Set of term documents IDs to update.
+		for t in _mIdf_Dictionary.find( { "_id": { "$in": list( s ) } } ):
+			toUpdate.add( t["_id"] )
 			s.remove( t["_id"] )
 
 		if s:  												# Insert new term documents if there are terms left in set.
-			toInsert = [{ "_id": t, "idf": 1 } for t in s]  # List of new term documents to bulk-insert in collection.
+			toInsert = [{ "_id": w, "idf": 1 } for w in s]  # List of new term documents to bulk-insert in collection.
 			_mIdf_Dictionary.insert_many( toInsert )
 
 		if toUpdate:
-			_mIdf_Dictionary.update_many( { "_id": { "$in": toUpdate } }, {
+			_mIdf_Dictionary.update_many( { "_id": { "$in": list( toUpdate ) } }, {
 				"$inc": { "idf": +1.0 } } )  				# Basically increase by one the term document frequency.
 
 	# Bulk insertion of term frequencies for each parsed document.
@@ -153,9 +199,9 @@ def _updateTFIDFCollections( documents ):
 		for t in doc["tokens"]:
 			terms.append( t )								# One array with terms, and another with weights (for now, frequencies).
 			weights.append( doc["tokens"][t] )
-		ds.append( {"_id": doc["id"], "t": terms, "w": weights, "n": -1.0} )
+		ds.append( {"_id": doc["id"], "t": terms, "w": weights} )
 
-	_mTf_Documents.insert_many( ds )						# A -1 in "n" indicates the term weights "w" are just frequencies.
+	_mTf_Documents.insert_many( ds )
 
 
 def _extractWikiPagesFromBZ2( lines ):
@@ -178,7 +224,7 @@ def _extractWikiPagesFromBZ2( lines ):
 				md = _DisambiguationPattern.match( m.group( 2 ) )
 				if md:
 					isDisambiguation = True
-					print( "[***] Skipping", m.group(2) )				# Skipping disambiguation pages.
+#					print( "[***] Skipping", m.group(2) )				# Skipping disambiguation pages.
 
 				doc = { "id": int(m.group(1)), 							# A new dictionary for this document.
 					    "title": m.group( 2 ),
@@ -218,13 +264,14 @@ def _tokenizeDoc( doc ):
 		tokens = [w for w in tokens if not w in _stopWords ]  			# Remove stop words.
 
 		for token in tokens:
-			if _PunctuationOnlyPattern.match( token ) is None:				# Skip patterns like '...' and '#' and '--'
-				t = _porterStemmer.stem( token, 0, len( token ) - 1 )		# Stem token.
-				if nDoc["tokens"].get( t ) is None:
-					nDoc["tokens"][t] = 1									# Create token in dictionary if it doesn't exist.
-				else:
-					nDoc["tokens"][t] += 1
-				maxFreq = max( nDoc["tokens"][t], maxFreq )					# Keep track of maximum term frequency within document.
+			if len( token ) <= 128:												# Skip too long tokens.
+				if _PunctuationOnlyPattern.match( token ) is None:				# Skip patterns like '...' and '#' and '--'
+					t = _porterStemmer.stem( token, 0, len( token ) - 1 )		# Stem token.
+					if nDoc["tokens"].get( t ) is None:
+						nDoc["tokens"][t] = 1									# Create token in dictionary if it doesn't exist.
+					else:
+						nDoc["tokens"][t] += 1
+					maxFreq = max( nDoc["tokens"][t], maxFreq )					# Keep track of maximum term frequency within document.
 
 	# Normalize frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
 	if maxFreq == 0:
@@ -234,7 +281,7 @@ def _tokenizeDoc( doc ):
 	for token in nDoc["tokens"]:
 		nDoc["tokens"][token] = 0.5 + 0.5 * nDoc["tokens"][token] / maxFreq
 
-	print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
+#	print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
 	return nDoc
 
 
@@ -253,37 +300,37 @@ def _initDBCollections():
 
 
 
-def go():
-	"""
-	Launch Wikipedia parsing process.
-	:return:
-	"""
-	print( "[!] Started to parse Wikipedia files" )
-	with open( _Multistream_Index, "r", encoding="utf-8" ) as indexFile:
-		seekByte = -1
-		for lineNumber, line in enumerate( indexFile ):			# Read index line by line.
-			components = line.strip().split( ":" )				# [ByteStart, DocID, DocTitle]
-			newSeekByte = int( components[0] )					# Find the next seek byte start that is different to current (defines a block).
-
-			if seekByte == -1:									# First time reading seek byte from file.
-				seekByte = newSeekByte
-				continue
-
-			if newSeekByte != seekByte:							# Changed seek-byte?
-				count = newSeekByte - seekByte					# Number of bytes to read from bz2 stream.
-				_processBZ2Block( seekByte, count )		# Read Wikipedia docs in this block.
-				seekByte = newSeekByte
-				break	# TODO: Remove to process all blocks.
-
-		# TODO: Process the last seek byte count = -1.
-
-	print( "[!] Finished parsing Wikipedia" )
-
-
-def _processBZ2Block( seekByte, count ):
-	with open( _Multistream_Dump, "rb" ) as bz2File:
-		bz2File.seek( seekByte )
-		block = bz2File.read( count )
-
-		dData = bz2.decompress( block )
-		print( dData )
+# def go():
+# 	"""
+# 	Launch Wikipedia parsing process.
+# 	:return:
+# 	"""
+# 	print( "[!] Started to parse Wikipedia files" )
+# 	with open( _Multistream_Index, "r", encoding="utf-8" ) as indexFile:
+# 		seekByte = -1
+# 		for lineNumber, line in enumerate( indexFile ):			# Read index line by line.
+# 			components = line.strip().split( ":" )				# [ByteStart, DocID, DocTitle]
+# 			newSeekByte = int( components[0] )					# Find the next seek byte start that is different to current (defines a block).
+#
+# 			if seekByte == -1:									# First time reading seek byte from file.
+# 				seekByte = newSeekByte
+# 				continue
+#
+# 			if newSeekByte != seekByte:							# Changed seek-byte?
+# 				count = newSeekByte - seekByte					# Number of bytes to read from bz2 stream.
+# 				_processBZ2Block( seekByte, count )		# Read Wikipedia docs in this block.
+# 				seekByte = newSeekByte
+# 				break	# TODO: Remove to process all blocks.
+#
+# 		# TODO: Process the last seek byte count = -1.
+#
+# 	print( "[!] Finished parsing Wikipedia" )
+#
+#
+# def _processBZ2Block( seekByte, count ):
+# 	with open( _Multistream_Dump, "rb" ) as bz2File:
+# 		bz2File.seek( seekByte )
+# 		block = bz2File.read( count )
+#
+# 		dData = bz2.decompress( block )
+# 		print( dData )
