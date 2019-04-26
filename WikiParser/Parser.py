@@ -13,14 +13,15 @@ from pymongo import MongoClient
 from urllib.parse import unquote
 import html
 from bs4 import BeautifulSoup
+import warnings
 import Tokenizer
 importlib.reload( Tokenizer )
 
 # File locations.
-_ROOT = "/Volumes/YoungMinEXT/"															# The root directory of the Wikipedia files.
+_ROOT = "/Volumes/YoungMinEXT/2014/"													# The root directory of the Wikipedia files.
 _Multistream_Index = _ROOT + "enwiki-20141106-pages-articles-multistream-index.txt"		# Use the multistream Wikipedia dump to save space.
 _Multistream_Dump = _ROOT + "enwiki-20141106-pages-articles-multistream.xml.bz2"
-_Extracted_XML = "/Users/youngmin/Downloads/Extracted/"									# Contains extracted XML dumped files.
+_Extracted_XML = _ROOT + "Extracted/Part2/"												# Contains extracted XML dumped files.
 
 _UrlProtocols = [
     'bitcoin', 'ftp', 'ftps', 'geo', 'git', 'gopher', 'http', 'https', 'irc', 'ircs', 'magnet', 'mailto', 'mms', 'news',
@@ -31,7 +32,7 @@ _UrlProtocols = [
 _FilenamePattern = re.compile( r"^wiki_\d+\.bz2$", re.I )										# Checking only the right files.
 _DocStartPattern = re.compile( r"^<doc.+?id=\"(\d+)\".+?title=\"\s*(.+)\s*\".*?>$", re.I )		# Document head tag.
 _DisambiguationPattern = re.compile( r"^(.+)\s+\(disambiguation\)$", re.I )						# Disambiguation title pattern.
-_ListTitlePattern = re.compile( r"^lists?\s+of", re.I )											# List title pattern.
+_SkipTitlePattern = re.compile( r"^(?:lists?\s+of|wikipedia:|template:|category:|file:)", re.I )	# Title pattern to skip.
 _ExternalLinkPattern = re.compile( r"<a.*?href=['\"]((" + r"|".join( _UrlProtocols ) + r")(?:%3a|:)|//).*?>\s*(.*?)\s*</a>", re.I )	# None Wikilinks.
 _LinkPattern = re.compile( r"<a.*?href=\"\s*(.+?)\s*\".*?>\s*(.*?)\s*</a>", re.I )				# Links: internals and externals.
 _UrlPattern = re.compile( r"(?:" + r"|".join( _UrlProtocols ) + r")(?:%3a|:)/.*?", re.I )		# URL pattern not inside a link.
@@ -53,6 +54,8 @@ _mTf_Documents = _mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1,
 # Total number of tokenized documents (used for IDF).
 _nEntities = 0
 
+# Supress warnings from BeautifulSoup module.
+warnings.filterwarnings("ignore", category=UserWarning, module='bs4')
 
 def buildTFIDFDictionary():
 	"""
@@ -60,9 +63,10 @@ def buildTFIDFDictionary():
 	"""
 	global _nEntities
 
-	_initDBCollections()
+#	_initDBCollections()
 	_nEntities = 0
 
+	startTotalTime = time.time()
 	directories = os.listdir( _Extracted_XML )					# Get directories of the form AA, AB, AC, etc.
 	for directory in directories:
 		fullDir = _Extracted_XML + directory
@@ -92,13 +96,14 @@ def buildTFIDFDictionary():
 					print( "[**] Done with", file, ":", endTime - startTime )
 
 	# Compute IDF and update term weights in all of the documents.
-	_computeIDFFromDocumentFrequencies()
-	_computeAndNormalizeTermWeights()
+#	_computeIDFFromDocumentFrequencies()
+#	_computeAndNormalizeTermWeights()
 
-	print( "[!] Total number of entities:", _nEntities )
+	endTotalTime = time.time()
+	print( "[!] Total number of entities:", _nEntities, "in", endTotalTime - startTotalTime, "secs" )
 
 
-def _computeIDFFromDocumentFrequencies():
+def computeIDFFromDocumentFrequencies():
 	"""
 	Use the document frequencies stored in the idf_dictionary collection to calculate log(N/(df_t + 1)).
 	"""
@@ -126,7 +131,7 @@ def _computeIDFFromDocumentFrequencies():
 	print( "[!] Done after", endTime - startTime, "secs." )
 
 
-def _computeAndNormalizeTermWeights():
+def computeAndNormalizeTermWeights():
 	"""
 	Compute weights for each entity document's terms by using the formula: [0.5 + 0.5*f(t,d)/MaxFreq(d)]*[log(N/(df_t + 1))].
 	Each factor is already stored in tf_documents and idf_dictionary; so we need to combine them and then normalize the weight.
@@ -221,7 +226,7 @@ def _extractWikiPagesFromBZ2( lines ):
 
 	extractingContents = False									# On/off when we enter the body of a document.
 	isDisambiguation = False									# On/off when processing a disambiguation document.
-	isList = False
+	isToSkip = False
 	firstLine = False											# Skip first line since it's a repetition of the title.
 	for line in lines:
 		line = line.strip()
@@ -232,8 +237,8 @@ def _extractWikiPagesFromBZ2( lines ):
 				title = html.unescape( m.group( 2 ) )					# Title without html entities.
 				if _DisambiguationPattern.match( title ) is not None:	# Skipping disambiguation pages.
 					isDisambiguation = True
-				elif _ListTitlePattern.match( title ) is not None:		# Skipping list pages.
-					isList = True
+				elif _SkipTitlePattern.match( title ) is not None:		# Skipping non informative pages.
+					isToSkip = True
 
 				doc = { "id": int(m.group(1)), 							# A new dictionary for this document.
 					    "title": title,
@@ -244,12 +249,12 @@ def _extractWikiPagesFromBZ2( lines ):
 				print( "Line:", line, "is not in any document!", file=sys.stderr )
 		else:
 			if line == "</doc>":
-				if not isDisambiguation and not isList:
+				if not isDisambiguation and not isToSkip:
 					documents += [doc]  								# Add extracted document to list for further processing in caller function.
 				extractingContents = False
 				isDisambiguation = False
-				isList = False
-			elif not isDisambiguation and not isList:					# Process text within <doc></doc> for non disambiguation pages.
+				isToSkip = False
+			elif not isDisambiguation and not isToSkip:					# Process text within <doc></doc> for non disambiguation pages.
 				if firstLine:
 					firstLine = False
 				else:
