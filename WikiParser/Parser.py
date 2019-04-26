@@ -12,6 +12,7 @@ import pymongo
 from pymongo import MongoClient
 from urllib.parse import unquote
 import html
+from bs4 import BeautifulSoup
 import Tokenizer
 importlib.reload( Tokenizer )
 
@@ -35,9 +36,6 @@ _ExternalLinkPattern = re.compile( r"<a.*?href=['\"]((" + r"|".join( _UrlProtoco
 _LinkPattern = re.compile( r"<a.*?href=\"\s*(.+?)\s*\".*?>\s*(.*?)\s*</a>", re.I )				# Links: internals and externals.
 _UrlPattern = re.compile( r"(?:" + r"|".join( _UrlProtocols ) + r")(?:%3a|:)/.*?", re.I )		# URL pattern not inside a link.
 _PunctuationOnlyPattern = re.compile( r"^\W+$" )
-
-# Undesired tags to remove *before* tokenizing text.
-_undesiredTags = ["<onlyinclude>", "</onlyinclude>", "<nowiki>", "</nowiki>", "<br>", "<br/>"]
 
 # Stop words set: use nltk.download('stopwords').  Then add: "n't" and "'s".
 _stopWords = set( stopwords.words( "english" ) )
@@ -136,7 +134,7 @@ def _computeAndNormalizeTermWeights():
 	startTime = time.time()
 	print( "[!] Computing and normalizing term frequency weights in entity documents... " )
 	requests = []														# We'll use bulk writes to speed up process.
-	BATCH_SIZE = 100
+	BATCH_SIZE = 200
 	totalRequests = 0
 	for e in _mTf_Documents.find():										# For each entity document....
 		idfDict = {}
@@ -271,10 +269,9 @@ def _tokenizeDoc( doc ):
 
 	maxFreq = 0
 	for line in doc["lines"]:
-		for tag in _undesiredTags:  									# Remove undesired tags.
-			line = line.replace( tag, "" )
-
-		line = _LinkPattern.sub( r"\2", line )  						# Replace all links with their anchor text.
+		soup = BeautifulSoup( line, "html.parser" )						# Get lines with just text: no <tags/>.
+		line = soup.getText().strip()
+		if not line: continue
 
 		tokens = Tokenizer.tokenize( line )  							# Tokenize a lower-cased version of article text.
 		tokens = [w for w in tokens if not w in _stopWords ]  			# Remove stop words.
