@@ -17,12 +17,6 @@ import warnings
 import Tokenizer
 importlib.reload( Tokenizer )
 
-# File locations.
-_ROOT = "/Volumes/YoungMinEXT/2014/"													# The root directory of the Wikipedia files.
-_Multistream_Index = _ROOT + "enwiki-20141106-pages-articles-multistream-index.txt"		# Use the multistream Wikipedia dump to save space.
-_Multistream_Dump = _ROOT + "enwiki-20141106-pages-articles-multistream.xml.bz2"
-_Extracted_XML = _ROOT + "Extracted/Part2/"												# Contains extracted XML dumped files.
-
 _UrlProtocols = [
     'bitcoin', 'ftp', 'ftps', 'geo', 'git', 'gopher', 'http', 'https', 'irc', 'ircs', 'magnet', 'mailto', 'mms', 'news',
     'nntp', 'redis', 'sftp', 'sip', 'sips', 'sms', 'ssh', 'svn', 'tel', 'telnet', 'urn', 'worldwind', 'xmpp'
@@ -51,25 +45,27 @@ _mIdf_Dictionary = _mNED["idf_dictionary"]						# {_id:str, idf:float}.
 _mEntity_ID = _mNED["entity_id"]								# {_id:int, e:str}.
 _mTf_Documents = _mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn]}.
 
-# Total number of tokenized documents (used for IDF).
-_nEntities = 0
-
 # Supress warnings from BeautifulSoup module.
 warnings.filterwarnings("ignore", category=UserWarning, module='bs4')
 
-def buildTFIDFDictionary():
-	"""
-	Build the TF-IDF dictionary by tokenizing non-disambiguation
-	"""
-	global _nEntities
 
-#	_initDBCollections()
-	_nEntities = 0
+def buildTFIDFDictionary( extractedDir, clearDBCollections=False ):
+	"""
+	Build the TF-IDF dictionary by tokenizing content-based Wikipedia pages.
+	Skip processing disambiguation pages, lists, and Wikipedia templates, files, etc.
+	Use this method for incremental tokenization of extracted Wikipedia BZ2 files.
+	Afterwards, use computeIDFFromDocumentFrequencies() and computeAndNormalizeTermWeights() to finalize TFIDF structs.
+	:param: extractedDir: Directory where the BZ2 files are located: must end in "/".
+	:param: clearDBCollections: Whether the DB collections must be dropped before tokenizing.
+	"""
+	if clearDBCollections:
+		_initDBCollections()
+	nEntities = 0												# Total number of tokenized documents in this pass.
 
 	startTotalTime = time.time()
-	directories = os.listdir( _Extracted_XML )					# Get directories of the form AA, AB, AC, etc.
+	directories = os.listdir( extractedDir )					# Get directories of the form AA, AB, AC, etc.
 	for directory in directories:
-		fullDir = _Extracted_XML + directory
+		fullDir = extractedDir + directory
 		if os.path.isdir( fullDir ):
 			print( "[*] Processing", directory )
 			files = os.listdir( fullDir )						# Get all files in current parsing directory, e.g. AA/wiki_00.bz2.
@@ -90,28 +86,26 @@ def buildTFIDFDictionary():
 					pool.join()											# Close pool and wait for work to finish.
 
 					# Update DB collections.
-					_nEntities += _updateTFIDFCollections( documents )
+					nEntities += _updateTFIDFCollections( documents )
 
 					endTime = time.time()
 					print( "[**] Done with", file, ":", endTime - startTime )
 
-	# Compute IDF and update term weights in all of the documents.
-#	_computeIDFFromDocumentFrequencies()
-#	_computeAndNormalizeTermWeights()
-
 	endTotalTime = time.time()
-	print( "[!] Total number of entities:", _nEntities, "in", endTotalTime - startTotalTime, "secs" )
+	print( "[!] Total number of entities:", nEntities, "in", endTotalTime - startTotalTime, "secs" )
 
 
 def computeIDFFromDocumentFrequencies():
 	"""
 	Use the document frequencies stored in the idf_dictionary collection to calculate log(N/(df_t + 1)).
 	"""
-	global _nEntities
+	nEntities = _mTf_Documents.count()									# Retrieve number of entities and terms in DB.
+	nTerms = _mIdf_Dictionary.count()
 	startTime = time.time()
-	LOG_N = math.log( _nEntities )
+	LOG_N = math.log( nEntities )
 
-	print( "[!] Computing IDF from document frequencies..." )
+	print( "[!] Detected", nEntities, "entities in ned.tf_documents collection" )
+	print( "[!] Computing IDF from document frequencies for", nTerms, "in ned.idf_dictionary collection" )
 	requests = []														# We'll use bulk writes to speed up process.
 	BATCH_SIZE = 10000
 	totalRequests = 0
