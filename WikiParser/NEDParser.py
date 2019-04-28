@@ -1,13 +1,9 @@
 import importlib
 import bz2
 import os
-import re
 import sys
 import time
-import math
-import PorterStemmer as PS
 from multiprocessing import Pool
-from nltk.corpus import stopwords
 import pymongo
 from urllib.parse import unquote
 import html
@@ -62,14 +58,6 @@ class NEDParser( P.Parser ):
 		print( "[!] Done after", endTime - startTime, "secs." )
 
 
-	def parseSFFromDisambiguationPages( self, extractedDir ):
-		"""
-		Grab the surface forms from disambiguation pages.
-		:param extractedDir: Directory where the individual BZ2 files are located: must end in "/".
-		"""
-		pass	# TODO: Complete body.
-
-
 	def parseSFFromWikilinks( self, extractedDir ):
 		"""
 		Grab surface forms from wikilinks in valid entity pages.
@@ -79,7 +67,7 @@ class NEDParser( P.Parser ):
 		"""
 		print( "------- Creating surface forms from Wikilinks and Disambiguation pages -------" )
 
-		nDocuments = 0
+		nDocs = 0
 		startTotalTime = time.time()
 		directories = os.listdir( extractedDir )  		# Get directories of the form AA, AB, AC, etc.
 		for directory in directories:
@@ -95,15 +83,19 @@ class NEDParser( P.Parser ):
 						with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
 							documents = self._extractWikiPagesFromBZ2( bz2File.readlines(), keepDisambiguation=True, lowerCase=False )
 
-							# TODO: Process documents, which contain regular entity pages and disambiguation pages.
+						# Process documents, which contain regular entity pages and disambiguation pages.
+						sfDocuments = []
+						for doc in documents:
+							sfDocuments.append( self._extractWikilinks( doc ) )
 
-						nDocuments += len( documents )
+						# Update DB collections.
+						nDocs += self._updateSurfaceFormsDictionary( sfDocuments )
 
 						endTime = time.time()
 						print( "[**] Done with", file, ":", endTime - startTime )
 
 		endTotalTime = time.time()
-		print( "[!] Total number of documents:", nDocuments, "in", endTotalTime - startTotalTime, "secs" )
+		print( "[!] Total number of documents:", nDocs, "in", endTotalTime - startTotalTime, "secs" )
 
 
 	def parseSFFromRedirectPages( self, msIndexFilePath, msDumpFilePath ):
@@ -126,6 +118,78 @@ class NEDParser( P.Parser ):
 		print( "[!] Collections for surface forms computations have been dropped" )
 
 
+	def _extractWikilinks( self, doc ):
+		"""
+		Parse inter-Wikilinks from an entity page or disambiguation page to obtain surface forms (by convention these will be lowercased).
+		:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
+		:return: A dictionary of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}.
+		"""
+		nDoc = {}		# This dict stores the surface forms and their corresponding entity mappings with a reference count.
+
+
+		# Treat disambiguation pages differently than regular valid pages.
+		commonSurfaceForm = ""
+		isDisambiguation = False
+		m = self._DisambiguationPattern.match( doc["title"] )
+		if m is not None:
+			isDisambiguation = True									# We'll be processing a disambiguation page.
+			commonSurfaceForm = m.group( 1 ).strip().lower()		# This will become the common surface name for all wikilinks within current disambiguation page.
+		else:
+			return nDoc
+
+		for line in doc["lines"]:
+			line = self._ExternalLinkPattern.sub( r"\3", line )		# Remove external links to avoid false positives.
+			if isDisambiguation:									# Separate processing.
+				for matchTuple in self._LinkPattern.findall( line ):
+					entity = html.unescape( unquote( matchTuple[0] ) ).strip()		# Clean entity name: e.g. "B%20%26amp%3B%20W" -> "B &amp; W" -> "B & W".
+
+					# Skip links to another disambiguation page or an invalid entity page.
+					if self._DisambiguationPattern.match( entity ) is None and self._SkipTitlePattern.match( entity ) is None:
+						record = self._mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
+						if record:													# Process only those entities existing in entity_id collection.
+							eId = "m." + str( record["_id"] )
+
+							# Creating entry in output dict.
+							if nDoc.get( commonSurfaceForm ) is None:
+								nDoc[commonSurfaceForm] = {}
+							if nDoc[commonSurfaceForm].get( eId ) is None:
+								nDoc[commonSurfaceForm][eId] = 0
+							nDoc[commonSurfaceForm][eId] += 1						# Entity is referred to by this surface form one more time (i.e. increase count).
+						else:
+							print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+			else:
+				# TODO: Process regular pages.
+				break
+
+		#	print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
+		return nDoc
+
+
+	def _updateSurfaceFormsDictionary( self, sfDocuments ):
+		"""
+		Update the NED dictionary of surface forms.
+		:param sfDocuments: List of (possibly empty) surface form docs of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}.
+		:return: Number of non-empty surface form documents processed.
+		"""
+		requests = []  										# We'll use bulk writes to speed up process.
+		BATCH_SIZE = 100
+		totalRequests = 0
+		for sfDoc in sfDocuments:
+			if not sfDoc: continue							# Skip empty sf dictionaries.
+
+			for sf in sfDoc:								# Iterate over surface forms in current dict.
+				requests.append( pymongo.UpdateOne( { "_id": sf }, { "$inc": sfDoc[sf] }, upsert=True ) )
+				totalRequests += 1
+				if len( requests ) == BATCH_SIZE:  			# Send lots of update requests.
+					self._mNed_Dictionary.bulk_write( requests )
+					print( "[*]", totalRequests, "processed" )
+					requests = []
+
+		if requests:
+			self._mNed_Dictionary.bulk_write( requests )  	# Process remaining requests.
+			print( "[*]", totalRequests, "processed" )
+
+		return totalRequests
 
 
 # def go():
