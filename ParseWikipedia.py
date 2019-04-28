@@ -1,6 +1,6 @@
 import importlib
-import WikiParser.Parser as Parser
-importlib.reload( Parser )
+from WikiParser import NEDParser as NP
+importlib.reload( NP )
 
 # File locations.
 _ROOT = "/Volumes/YoungMinEXT/2014/"													# The root directory of the Wikipedia files.
@@ -9,10 +9,13 @@ _Multistream_Dump = _ROOT + "enwiki-20141106-pages-articles-multistream.xml.bz2"
 _Extracted_XML = _ROOT + "Extracted/Part4/"												# Contains extracted XML dumped files.
 
 if __name__ is "__main__":
-#	Parser.buildTFIDFDictionary( _Extracted_XML, clearDBCollections=True )
+#	TFIDFParser.buildTFIDFDictionary( _Extracted_XML )
 
 	# Compute IDF and update term weights in all of the documents.
-#	Parser.computeIDFFromDocumentFrequencies()
-#	Parser.computeAndNormalizeTermWeights()
+#	TFIDFParser.initDBCollections()
+#	TFIDFParser.computeIDFFromDocumentFrequencies()
+#	TFIDFParser.computeAndNormalizeTermWeights()
 
-	print( "Done!" )
+	parser = NP.NEDParser()
+	parser.initDBCollections()
+	parser.parseSFFromEntityNames()
