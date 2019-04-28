@@ -16,13 +16,17 @@ import Tokenizer
 importlib.reload( P )
 importlib.reload( Tokenizer )
 
-"""
-Parsing Wikipedia extracted and multistream archives to construct the surface forms dictionary and the inter-links table.
-"""
+
 class NEDParser( P.Parser ):
+	"""
+	Parsing Wikipedia extracted and multistream archives to construct the surface forms dictionary and the inter-links table.
+	"""
 
 
-	def __init__(self):
+	def __init__( self ):
+		"""
+		Constructor.
+		"""
 		P.Parser.__init__( self )
 
 		# Defining connections to collections for entity disambiguation.
