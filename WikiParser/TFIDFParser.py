@@ -1,12 +1,10 @@
 import importlib
 import bz2
 import os
-import sys
 import time
 import math
 from multiprocessing import Pool
 import pymongo
-import html
 from . import Parser as P
 import Tokenizer
 importlib.reload( Tokenizer )
@@ -36,7 +34,7 @@ class TFIDFParser( P.Parser ):
 		Skip processing disambiguation pages, lists, and Wikipedia templates, files, etc.
 		Use this method for incremental tokenization of extracted Wikipedia BZ2 files.
 		Afterwards, use computeIDFFromDocumentFrequencies() and computeAndNormalizeTermWeights() to finalize TFIDF structs.
-		:param: extractedDir: Directory where the extracted BZ2 files are located: must end in "/".
+		:param extractedDir: Directory where the extracted BZ2 files are located: must end in "/".
 		"""
 		nEntities = 0												# Total number of tokenized documents in this pass.
 
@@ -185,55 +183,6 @@ class TFIDFParser( P.Parser ):
 
 		self._mTf_Documents.insert_many( ds )
 		return len( bulkEntities )
-
-
-	def _extractWikiPagesFromBZ2( self, lines ):
-		"""
-		Extract non-disambiguation articles from extracted Wikipedia bz2 archives.
-		:param lines: A list of sentences.
-		:return: List of document objects: {id:int, title:str, lines:[str]}.
-		"""
-		documents = []												# We collect all documents in a list.
-		doc = {}													# A processed document is a dictionary: {id: x, title: y}
-
-		extractingContents = False									# On/off when we enter the body of a document.
-		isDisambiguation = False									# On/off when processing a disambiguation document.
-		isToSkip = False
-		firstLine = False											# Skip first line since it's a repetition of the title.
-		for line in lines:
-			line = line.strip()
-			if line == "": continue									# Skip empty lines.
-			if not extractingContents:								# Wait for the sentinel: <doc ...>
-				m = P.Parser._DocStartPattern.match( line )
-				if m:														# Start of document?
-					title = html.unescape( m.group( 2 ) )					# Title without html entities.
-					if P.Parser._DisambiguationPattern.match( title ) is not None:	# Skipping disambiguation pages.
-						isDisambiguation = True
-					elif P.Parser._SkipTitlePattern.match( title ) is not None:		# Skipping non informative pages.
-						isToSkip = True
-
-					doc = { "id": int(m.group(1)), 							# A new dictionary for this document.
-							"title": title,
-							"lines": [] }
-					extractingContents = True								# Turn on the flag: we started reading a document.
-					firstLine = True										# Will be reading title repetion next in the first line.
-				else:
-					print( "Line:", line, "is not in any document!", file=sys.stderr )
-			else:
-				if line == "</doc>":
-					if not isDisambiguation and not isToSkip:
-						documents += [doc]  								# Add extracted document to list for further processing in caller function.
-					extractingContents = False
-					isDisambiguation = False
-					isToSkip = False
-				elif not isDisambiguation and not isToSkip:					# Process text within <doc></doc> for non disambiguation pages.
-					if firstLine:
-						firstLine = False
-					else:
-	#					_ExternalLinkPattern.sub( r"\3", line )				# Replace external links for their anchor texts.  (No interwiki links affected).
-						doc["lines"].append( line.lower() )					# Add (lowercase) line of text for multithreading.
-
-		return documents
 
 
 	def initDBCollections( self ):

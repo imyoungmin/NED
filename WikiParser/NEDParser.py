@@ -65,7 +65,7 @@ class NEDParser( P.Parser ):
 	def parseSFFromDisambiguationPages( self, extractedDir ):
 		"""
 		Grab the surface forms from disambiguation pages.
-		:param: extractedDir: Directory where the individual BZ2 files are located: must end in "/".
+		:param extractedDir: Directory where the individual BZ2 files are located: must end in "/".
 		"""
 		pass	# TODO: Complete body.
 
@@ -73,17 +73,44 @@ class NEDParser( P.Parser ):
 	def parseSFFromWikilinks( self, extractedDir ):
 		"""
 		Grab surface forms from wikilinks in valid entity pages.
+		Skip processing disambiguation pages, lists, and Wikipedia templates, files, etc.
+		Use this method for incremental analysis of extracted Wikipedia BZ2 files.
 		:param extractedDir: Directory where the individual BZ2 files are located: must end in "/".
-		:return:
 		"""
-		pass	# TODO: Complete body.
+		print( "------- Creating surface forms from Wikilinks and Disambiguation pages -------" )
+
+		nDocuments = 0
+		startTotalTime = time.time()
+		directories = os.listdir( extractedDir )  		# Get directories of the form AA, AB, AC, etc.
+		for directory in directories:
+			fullDir = extractedDir + directory
+			if os.path.isdir( fullDir ):
+				print( "[*] Processing", directory )
+				files = os.listdir( fullDir )  			# Get all files in current parsing directory, e.g. AA/wiki_00.bz2.
+				files.sort()
+				for file in files:
+					fullFile = fullDir + "/" + file
+					if os.path.isfile( fullFile ) and P.Parser._FilenamePattern.match( file ):		# Read bz2 file and process it.
+						startTime = time.time()
+						with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
+							documents = self._extractWikiPagesFromBZ2( bz2File.readlines(), keepDisambiguation=True, lowerCase=False )
+
+							# TODO: Process documents, which contain regular entity pages and disambiguation pages.
+
+						nDocuments += len( documents )
+
+						endTime = time.time()
+						print( "[**] Done with", file, ":", endTime - startTime )
+
+		endTotalTime = time.time()
+		print( "[!] Total number of documents:", nDocuments, "in", endTotalTime - startTotalTime, "secs" )
 
 
-	def parseSFFromRedirectPages( self, msIndexFilePath, musDumpFilePath ):
+	def parseSFFromRedirectPages( self, msIndexFilePath, msDumpFilePath ):
 		"""
 
 		:param msIndexFilePath:
-		:param musDumpFilePath:
+		:param msDumpFilePath:
 		:return:
 		"""
 		pass	# TODO: Complete body.

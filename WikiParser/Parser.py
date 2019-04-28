@@ -3,6 +3,7 @@ import re
 import PorterStemmer as PS
 from nltk.corpus import stopwords
 from pymongo import MongoClient
+import html
 from abc import ABCMeta, abstractmethod
 from bs4 import BeautifulSoup
 import warnings
@@ -48,6 +49,56 @@ class Parser( metaclass=ABCMeta ):
 		self._mEntity_ID = self._mNED["entity_id"]  		# Common collection connector to hold entity titles and IDs: {_id:int, e:str}.
 
 
+	def _extractWikiPagesFromBZ2( self, lines, keepDisambiguation=False, lowerCase=True ):
+		"""
+		Extract valid articles from extracted Wikipedia bz2 archives.
+		:param lines: A list of sentences.
+		:param keepDisambiguation: Do not discard disambiguation Wiki pages.
+		:param lowerCase: Transform lines in output documents to lowercase.
+		:return: List of document objects: {id:int, title:str, lines:[str]}.
+		"""
+		documents = []												# We collect all documents in a list.
+		doc = {}													# A processed document is a dictionary: {id: x, title: y}
+
+		extractingContents = False									# On/off when we enter the body of a document.
+		isToSkip = False
+		firstLine = False											# Skip first line since it's a repetition of the title.
+		for line in lines:
+			line = line.strip()
+			if line == "": continue									# Skip empty lines.
+			if not extractingContents:								# Wait for the sentinel: <doc ...>
+				m = self._DocStartPattern.match( line )
+				if m:														# Start of document?
+					title = html.unescape( m.group( 2 ) )					# Title without html entities.
+
+					# Skipping undesired pages.
+					if ( not keepDisambiguation and self._DisambiguationPattern.match( title ) is not None ) \
+							or	self._SkipTitlePattern.match( title ) is not None:
+						isToSkip = True
+
+					doc = { "id": int(m.group(1)), 							# A new dictionary for this document.
+							"title": title,
+							"lines": [] }
+					extractingContents = True								# Turn on the flag: we started reading a document.
+					firstLine = True										# Will be reading title repetion next in the first line.
+				else:
+					print( "Line:", line, "is not in any document!", file=sys.stderr )
+			else:
+				if line == "</doc>":
+					if not isToSkip:
+						documents += [doc]  								# Add extracted document to list for further processing in caller function.
+					extractingContents = False
+					isToSkip = False
+				elif not isToSkip:											# Process text within <doc></doc> for non-skipped pages.
+					if firstLine:
+						firstLine = False
+					else:
+	#					_ExternalLinkPattern.sub( r"\3", line )				# Replace external links for their anchor texts.  (No interwiki links affected).
+						doc["lines"].append( line.lower() if lowerCase else line )		# Add (lowercased?) line of text to output document.
+
+		return documents
+
+
 	@abstractmethod
 	def initDBCollections( self ):
 		"""
@@ -55,12 +106,13 @@ class Parser( metaclass=ABCMeta ):
 		"""
 		pass
 
+
 	@staticmethod
 	def tokenizeDoc( doc, normalizeTF=True ):
 		"""
 		Tokenize a document object.
-		:param: doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
-		:param: normalizeTF: Whether normalize raw term frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
+		:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
+		:param normalizeTF: Whether normalize raw term frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
 		:return: A dictionary of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
 		"""
 		nDoc = { "id": doc["id"], "title": doc["title"], "tokens": { } }
