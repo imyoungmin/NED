@@ -46,7 +46,7 @@ class Parser( metaclass=ABCMeta ):
 		# MongoDB connections.
 		self._mClient = MongoClient( "mongodb://localhost:27017/" )
 		self._mNED = self._mClient.ned
-		self._mEntity_ID = self._mNED["entity_id"]  		# Common collection connector to hold entity titles and IDs: {_id:int, e:str}.
+		self._mEntity_ID = self._mNED["entity_id"]  		# Common collection connector to hold entity titles, their lower-case version, and IDs: {_id:int, e:str, e_l:str}.
 
 
 	def _extractWikiPagesFromBZ2( self, lines, keepDisambiguation=False, lowerCase=True ):

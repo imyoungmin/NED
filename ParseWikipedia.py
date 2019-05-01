@@ -18,6 +18,7 @@ if __name__ is "__main__":
 	# tfIdfParser.buildTFIDFDictionary( _Extracted_XML )
 	# tfIdfParser.computeIDFFromDocumentFrequencies()
 	# tfIdfParser.computeAndNormalizeTermWeights()
+	# tfIdfParser.addMissingLowercaseEntityName()
 
 	# Compute surface forms and fill collections for NED.
 	nedParser = NP.NEDParser()

@@ -148,7 +148,7 @@ class TFIDFParser( P.Parser ):
 		"""
 		# Insert Wikipedia titles and documents IDs in entity_id collection.
 		# This serves the purpose of knowing which entities DO exist in the KB.
-		bulkEntities = [{ "_id": doc["id"], "e": doc["title"] } for doc in documents if doc]		# Skip any empty document.
+		bulkEntities = [{ "_id": doc["id"], "e": doc["title"], "e_l": doc["title"].lower() } for doc in documents if doc]		# Skip any empty document.
 		self._mEntity_ID.insert_many( bulkEntities )
 
 		# Upsert terms and document frequencies in idf_dictionary collection.
@@ -195,5 +195,34 @@ class TFIDFParser( P.Parser ):
 
 		# Create indices on (re)created collections.
 		self._mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
+		self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )		# Can't be unique: example - ALGOL and Algol both exist as entity names.
 
 		print( "[!] Collections have been dropped")
+
+
+	def addMissingLowercaseEntityName( self ):
+		"""
+		Execute this function to add "e_l" to the entity_id collection ONLY in the case it's missing.
+		"""
+		print( "------- Adding missing column 'e_l' to entity_id collection -------" )
+
+		startTime = time.time()
+
+		# Create unique index on missing column.
+		self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )
+
+		requests = []  									# We'll use bulk writes to speed up process.
+		BATCH_SIZE = 10000
+		totalRequests = 0
+		for t in self._mEntity_ID.find():
+			requests.append( pymongo.UpdateOne( { "_id": t["_id"] }, { "$set": { "e_l": t["e"].lower() } } ) )
+			totalRequests += 1
+			if len( requests ) == BATCH_SIZE:  			# Send lots of update requests.
+				self._mEntity_ID.bulk_write( requests )
+				print( "[*]", totalRequests, "processed" )
+				requests = []
+		if requests:
+			self._mEntity_ID.bulk_write( requests )  	# Process remaining requests.
+			print( "[*]", totalRequests, "processed" )
+		endTime = time.time()
+		print( "[!] Done after", endTime - startTime, "secs." )
