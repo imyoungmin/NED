@@ -26,8 +26,8 @@ class NEDParser( P.Parser ):
 		P.Parser.__init__( self )
 
 		# Defining connections to collections for entity disambiguation.
-		self._mNed_Dictionary = self._mNED["ned_dictionary"]			# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}.
-		self._mNed_Linking = self._mNED["ned_linking"]					# {_id:int, from:{"e_1":true, "e_2":true,..., "e_3":true}}.
+		self._mNed_Dictionary = self._mNED["ned_dictionary"]			# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}.	-- m stands for 'mapping.'
+		self._mNed_Linking = self._mNED["ned_linking"]					# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}.   -- f stands for 'from.'
 
 
 	def parseSFFromEntityNames( self ):
@@ -84,12 +84,17 @@ class NEDParser( P.Parser ):
 							documents = self._extractWikiPagesFromBZ2( bz2File.readlines(), keepDisambiguation=True, lowerCase=False )
 
 						# Process documents which contain regular entity pages and disambiguation pages.
-						sfDocuments = []
+						rDocuments = []
 						for doc in documents:
-							sfDocuments.append( self._extractWikilinks( doc ) )
+							rDocuments.append( self._extractWikilinks( doc ) )
+
+						# Split rDocuments' tuples into surface form dicts and linking dicts.
+						sfDocuments = [rDoc[0] for rDoc in rDocuments if rDoc[0]]
+						linkDocuments = [rDoc[1] for rDoc in rDocuments if rDoc[1]["to"]]
 
 						# Update DB collections.
-#						nDocs += self._updateSurfaceFormsDictionary( sfDocuments )
+						# nDocs += self._updateSurfaceFormsDictionary( sfDocuments )
+						# self._updateLinkingCollection( linkDocuments )
 
 						endTime = time.time()
 						print( "[**] Done with", file, ":", endTime - startTime )
@@ -121,10 +126,13 @@ class NEDParser( P.Parser ):
 	def _extractWikilinks( self, doc ):
 		"""
 		Parse inter-Wikilinks from an entity page or disambiguation page to obtain surface forms (by convention these will be lowercased).
+		Also, collect the IDs of entities that current document points to, as long as current doc is a non-disambiguatio page.
 		:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
-		:return: A dictionary of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}.
+		:return: A tuple with two dicts: one of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}, \
+				 and another of the form {from:int, to: set{int, int, ..., int}}.
 		"""
 		nDoc = {}		# This dict stores the surface forms and their corresponding entity mappings with a reference count.
+		nSet = set()	# Stores the IDs of pages pointed to by this non-disambiguation document (e.g. nSet is empty for a disambiguation page).
 
 
 		# Treat disambiguation pages differently than regular valid pages.
@@ -158,7 +166,7 @@ class NEDParser( P.Parser ):
 					elif n > 1:										# If more than one record, then Wikilink must match the true entity name: case sensitive.
 						record = self._mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
 
-					if record:													# Process only those entities existing in entity_id collection.
+					if record:										# Process only those entities existing in entity_id collection.
 						eId = "m." + str( record["_id"] )
 
 						# Creating entry in output dict.
@@ -166,12 +174,15 @@ class NEDParser( P.Parser ):
 							nDoc[surfaceForm] = {}
 						if nDoc[surfaceForm].get( eId ) is None:
 							nDoc[surfaceForm][eId] = 0
-						nDoc[surfaceForm][eId] += 1								# Entity is referred to by this surface form one more time (i.e. increase count).
+						nDoc[surfaceForm][eId] += 1					# Entity is referred to by this surface form one more time (i.e. increase count).
+
+						if not isDisambiguation:
+							nSet.add( record["_id"] )				# Keep track of page IDs pointed to by this non-disambiguation document.
 					# else:
 					# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
 
-		print( "[***]", doc["id"], doc["title"], "... Done!" )
-		return nDoc
+		# print( "[***]", doc["id"], doc["title"], "... Done!" )
+		return nDoc, { "from": doc["id"], "to": nSet }
 
 
 	def _updateSurfaceFormsDictionary( self, sfDocuments ):
@@ -199,6 +210,15 @@ class NEDParser( P.Parser ):
 			print( "[*]", totalRequests, "processed" )
 
 		return totalRequests
+
+
+	def _updateLinkingCollection( self, linkDocuments ):
+		"""
+		Add more link references to the ned_linking collections.
+		:param linkDocuments: A list of dicts of the form {from:int, to: set{int, int, ..., int}}.
+		"""
+		# TODO: Implement this.
+		pass
 
 
 # def go():
