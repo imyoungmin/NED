@@ -24,4 +24,4 @@ if __name__ is "__main__":
 	nedParser = NP.NEDParser()
 	nedParser.initDBCollections()
 	nedParser.parseSFFromEntityNames()
-	nedParser.parseSFFromWikilinks( _Extracted_XML )
+	nedParser.parseSFsAndLsFromWikilinks( _Extracted_XML )

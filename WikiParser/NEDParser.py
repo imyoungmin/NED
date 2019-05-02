@@ -58,14 +58,14 @@ class NEDParser( P.Parser ):
 		print( "[!] Done after", endTime - startTime, "secs." )
 
 
-	def parseSFFromWikilinks( self, extractedDir ):
+	def parseSFsAndLsFromWikilinks( self, extractedDir ):
 		"""
-		Grab surface forms from wikilinks in valid entity pages.
+		Grab surface forms and link relationships from wikilinks in valid entity pages.
 		Skip processing disambiguation pages, lists, and Wikipedia templates, files, etc.
 		Use this method for incremental analysis of extracted Wikipedia BZ2 files.
 		:param extractedDir: Directory where the individual BZ2 files are located: must end in "/".
 		"""
-		print( "------- Creating surface forms from Wikilinks and Disambiguation pages -------" )
+		print( "------- Creating surface forms and links from Wikilinks and Disambiguation pages -------" )
 
 		startTotalTime = time.time()
 		directories = os.listdir( extractedDir )  		# Get directories of the form AA, AB, AC, etc.
@@ -116,11 +116,11 @@ class NEDParser( P.Parser ):
 				if doc[1]["to"]: linkDocuments.append( doc[1] )		# Link information.
 
 		# Update DB collections.
-		sfs = self._updateSurfaceFormsDictionary( sfDocuments )
+		self._updateSurfaceFormsDictionary( sfDocuments )
 		self._updateLinkingCollection( linkDocuments )
 
 		endTime = time.time()
-		print( "[**] Processed", len( chunks ), "chunks with", sfs, "surface forms in", endTime - startTime, "secs" )
+		print( "[**] Processed", len( chunks ), "chunks in", endTime - startTime, "secs" )
 
 
 	def parseSFFromRedirectPages( self, msIndexFilePath, msDumpFilePath ):
@@ -218,8 +218,9 @@ class NEDParser( P.Parser ):
 		"""
 		Update the NED dictionary of surface forms.
 		:param sfDocuments: List of (possibly empty) surface form docs of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}.
-		:return: Number of non-empty surface form documents processed.
 		"""
+		print( "[*] Updating ned_dictionary collection... ", end="" )
+
 		requests = []  										# We'll use bulk writes to speed up process.
 		BATCH_SIZE = 10000
 		totalRequests = 0
@@ -231,23 +232,44 @@ class NEDParser( P.Parser ):
 				totalRequests += 1
 				if len( requests ) == BATCH_SIZE:  			# Send lots of update requests.
 					self._mNed_Dictionary.bulk_write( requests )
-					print( "[*]", totalRequests, "processed" )
 					requests = []
 
 		if requests:
 			self._mNed_Dictionary.bulk_write( requests )  	# Process remaining requests.
-			print( "[*]", totalRequests, "processed" )
-
-		return totalRequests
+		print( "Done with", totalRequests, "requests sent!" )
 
 
 	def _updateLinkingCollection( self, linkDocuments ):
 		"""
-		Add more link references to the ned_linking collections.
+		Add more link references to the ned_linking collection.
 		:param linkDocuments: A list of dicts of the form {from:int, to: set{int, int, ..., int}}.
 		"""
-		# TODO: Implement this.
-		pass
+		print( "[*] Updating ned_linking collection... ", end="" )
+
+		# Conform input to the following format: {"eId1":{"f.eId2":True, "f.eId3":True}, ..., "eIdn":{"f.eId1":True,...}}
+		toFrom = {}
+		for doc in linkDocuments:
+			fId = "f." + str( doc["from"] )				# --> from 12 to "f.12".
+			for to in doc["to"]:
+				if toFrom.get( to )	is None:
+					toFrom[to] = {}
+				toFrom[to][fId] = True
+
+		# Now, upsert ned_linking collection with UpdateOne bulk writes.
+		requests = []
+		BATCH_SIZE = 10000
+		totalRequests = 0
+		for to in toFrom:
+			requests.append( pymongo.UpdateOne( { "_id": int( to ) }, { "$set": toFrom[to] }, upsert=True ) )
+			totalRequests += 1
+			if len( requests ) == BATCH_SIZE:			# Send lots of update requests at once.
+				self._mNed_Linking.bulk_write( requests )
+				requests = []
+
+		if requests:
+			self._mNed_Linking.bulk_write( requests )	# Process remaining requests.
+
+		print( "Done with", totalRequests, "requests sent!" )
 
 
 # def go():
