@@ -1,7 +1,6 @@
 import importlib
 import bz2
 import os
-import sys
 import time
 from multiprocessing import Pool
 from pymongo import MongoClient
@@ -68,9 +67,10 @@ class NEDParser( P.Parser ):
 		"""
 		print( "------- Creating surface forms from Wikilinks and Disambiguation pages -------" )
 
-		nDocs = 0
 		startTotalTime = time.time()
 		directories = os.listdir( extractedDir )  		# Get directories of the form AA, AB, AC, etc.
+		chunks = []
+		MAX_CHUNK_SIZE = 20
 		for directory in directories:
 			fullDir = extractedDir + directory
 			if os.path.isdir( fullDir ):
@@ -80,29 +80,47 @@ class NEDParser( P.Parser ):
 				for file in files:
 					fullFile = fullDir + "/" + file
 					if os.path.isfile( fullFile ) and P.Parser._FilenamePattern.match( file ):		# Read bz2 file and process it.
-						startTime = time.time()
 						with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
 							documents = self._extractWikiPagesFromBZ2( bz2File.readlines(), keepDisambiguation=True, lowerCase=False )
 
-						# Process documents which contain regular entity pages and disambiguation pages.
-						pool = Pool()
-						rDocuments = pool.map( NEDParser._extractWikilinks, documents )  			# Each document object in its own thread.
-						pool.close()
-						pool.join()  # Close pool and wait for work to finish.
+						# Add documents to a chunk list in preparation for multiprocessing.
+						chunks.append( documents )
+						if len( chunks ) == MAX_CHUNK_SIZE:
+							self._extractAndProcessWikilinks( chunks )		# Extract Wikilinks and update collections in DB.
+							chunks = []
 
-						# Split rDocuments' tuples into surface form dicts and linking dicts.
-						sfDocuments = [rDoc[0] for rDoc in rDocuments if rDoc[0]]
-						linkDocuments = [rDoc[1] for rDoc in rDocuments if rDoc[1]["to"]]
-
-						# Update DB collections.
-						# nDocs += self._updateSurfaceFormsDictionary( sfDocuments )
-						# self._updateLinkingCollection( linkDocuments )
-
-						endTime = time.time()
-						print( "[**] Done with", file, ":", endTime - startTime )
+		if chunks:
+			self._extractAndProcessWikilinks( chunks )						# Process remaining chunks of documents.
 
 		endTotalTime = time.time()
-		print( "[!] Total number of documents:", nDocs, "in", endTotalTime - startTotalTime, "secs" )
+		print( "[!] Completed process in", endTotalTime - startTotalTime, "secs" )
+
+
+	def _extractAndProcessWikilinks( self, chunks ):
+		"""
+		Extract wikilinks from regular and disambiguation pages, and write results to ned_dictionary and ned_linking collections.
+		:param chunks: A list of lists of extracted wiki documents of the form {id:int, title:str, lines:[str]}.
+		"""
+		startTime = time.time()
+		pool = Pool()
+		rChunks = pool.map( NEDParser._extractWikilinks, chunks )  	# Each chunk of document objects in its own thread.
+		pool.close()
+		pool.join()  												# Close pool and wait for work to finish.
+
+		# Split rChunks' lists of tuples into surface form dicts and linking dicts.
+		sfDocuments = []
+		linkDocuments = []
+		for chunk in rChunks:
+			for doc in chunk:
+				if doc[0]: sfDocuments.append( doc[0] )				# Surface forms.
+				if doc[1]["to"]: linkDocuments.append( doc[1] )		# Link information.
+
+		# Update DB collections.
+		sfs = self._updateSurfaceFormsDictionary( sfDocuments )
+		self._updateLinkingCollection( linkDocuments )
+
+		endTime = time.time()
+		print( "[**] Processed", len( chunks ), "chunks with", sfs, "surface forms in", endTime - startTime, "secs" )
 
 
 	def parseSFFromRedirectPages( self, msIndexFilePath, msDumpFilePath ):
@@ -126,69 +144,74 @@ class NEDParser( P.Parser ):
 
 
 	@staticmethod
-	def _extractWikilinks( doc ):
+	def _extractWikilinks( docs ):
 		"""
 		Parse inter-Wikilinks from an entity page or disambiguation page to obtain surface forms (by convention these will be lowercased).
 		Also, collect the IDs of entities that current document points to, as long as current doc is a non-disambiguatio page.
-		:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
-		:return: A tuple with two dicts: one of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}, \
+		:param docs: List or chunk of document dictionaries to process: {id:int, title:str, lines:[str]}.
+		:return: A list of tuples with two dicts: one of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}, \
 				 and another of the form {from:int, to: set{int, int, ..., int}}.
 		"""
-		nDoc = {}		# This dict stores the surface forms and their corresponding entity mappings with a reference count.
-		nSet = set()	# Stores the IDs of pages pointed to by this non-disambiguation document (e.g. nSet is empty for a disambiguation page).
-
-		mClient = MongoClient( "mongodb://localhost:27017/" )
+		mClient = MongoClient( "mongodb://localhost:27017/" )		# One single connection to rule all docs' DB requests.
 		mNED = mClient.ned
 		mEntity_ID = mNED["entity_id"]
 
-		# Treat disambiguation pages differently than regular valid pages.
-		surfaceForm = ""
-		isDisambiguation = False
-		m = P.Parser._DisambiguationPattern.match( doc["title"] )
-		if m is not None:
-			isDisambiguation = True									# We'll be processing a disambiguation page.
-			surfaceForm = m.group( 1 ).strip().lower()				# This will become the common surface name for all wikilinks within current disambiguation page.
+		result = []
+		for doc in docs:
+			nDoc = {}		# This dict stores the surface forms and their corresponding entity mappings with a reference count.
+			nSet = set()	# Stores the IDs of pages pointed to by this non-disambiguation document (e.g. nSet is empty for a disambiguation page).
 
-		for line in doc["lines"]:
-			line = P.Parser._ExternalLinkPattern.sub( r"\3", line )	# Remove external links to avoid false positives.
-			for matchTuple in P.Parser._LinkPattern.findall( line ):
-				entity = html.unescape( unquote( matchTuple[0] ) ).strip()	# Clean entity name: e.g. "B%20%26amp%3B%20W" -> "B &amp; W" -> "B & W".
+			# Treat disambiguation pages differently than regular valid pages.
+			surfaceForm = ""
+			isDisambiguation = False
+			m = P.Parser._DisambiguationPattern.match( doc["title"] )
+			if m is not None:
+				isDisambiguation = True									# We'll be processing a disambiguation page.
+				surfaceForm = m.group( 1 ).strip().lower()				# This will become the common surface name for all wikilinks within current disambiguation page.
 
-				if not isDisambiguation:
-					surfaceForm = matchTuple[1].lower()				# For non disambiguation pages, anchor text is the surface form.
+			for line in doc["lines"]:
+				line = P.Parser._ExternalLinkPattern.sub( r"\3", line )	# Remove external links to avoid false positives.
+				for matchTuple in P.Parser._LinkPattern.findall( line ):
+					entity = html.unescape( unquote( matchTuple[0] ) ).strip()	# Clean entity name: e.g. "B%20%26amp%3B%20W" -> "B &amp; W" -> "B & W".
 
-				if len( surfaceForm ) > 128:						# Skip too long of a surface form.
-					continue
+					if not isDisambiguation:
+						surfaceForm = matchTuple[1].lower()				# For non disambiguation pages, anchor text is the surface form.
 
-				# Skip links to another disambiguation page or an invalid entity page.
-				if P.Parser._DisambiguationPattern.match( entity ) is None and P.Parser._SkipTitlePattern.match( entity ) is None:
+					if len( surfaceForm ) > 128:						# Skip too long of a surface form.
+						continue
 
-					record = None  									# Sentinel for found entity in DB.
+					# Skip links to another disambiguation page or an invalid entity page.
+					if P.Parser._DisambiguationPattern.match( entity ) is None and P.Parser._SkipTitlePattern.match( entity ) is None:
 
-					# First check how many entities match the lowercase version given in link: we may have ALGOL and Algol...
-					n = mEntity_ID.find( { "e_l": entity.lower() } ).count()
-					if n == 1:										# One match?  Then retrieve entity ID.
-						record = mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
-					elif n > 1:										# If more than one record, then Wikilink must match the true entity name: case sensitive.
-						record = mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
+						record = None  									# Sentinel for found entity in DB.
 
-					if record:										# Process only those entities existing in entity_id collection.
-						eId = "m." + str( record["_id"] )
+						# First check how many entities match the lowercase version given in link: we may have ALGOL and Algol...
+						n = mEntity_ID.find( { "e_l": entity.lower() } ).count()
+						if n == 1:										# One match?  Then retrieve entity ID.
+							record = mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
+						elif n > 1:										# If more than one record, then Wikilink must match the true entity name: case sensitive.
+							record = mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
 
-						# Creating entry in output dict.
-						if nDoc.get( surfaceForm ) is None:
-							nDoc[surfaceForm] = {}
-						if nDoc[surfaceForm].get( eId ) is None:
-							nDoc[surfaceForm][eId] = 0
-						nDoc[surfaceForm][eId] += 1					# Entity is referred to by this surface form one more time (i.e. increase count).
+						if record:										# Process only those entities existing in entity_id collection.
+							eId = "m." + str( record["_id"] )
 
-						if not isDisambiguation:
-							nSet.add( record["_id"] )				# Keep track of page IDs pointed to by this non-disambiguation document.
-					# else:
-					# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+							# Creating entry in output dict.
+							if nDoc.get( surfaceForm ) is None:
+								nDoc[surfaceForm] = {}
+							if nDoc[surfaceForm].get( eId ) is None:
+								nDoc[surfaceForm][eId] = 0
+							nDoc[surfaceForm][eId] += 1					# Entity is referred to by this surface form one more time (i.e. increase count).
 
-		# print( "[***]", doc["id"], doc["title"], "... Done!" )
-		return nDoc, { "from": doc["id"], "to": nSet }
+							if not isDisambiguation:
+								nSet.add( record["_id"] )				# Keep track of page IDs pointed to by this non-disambiguation document.
+						# else:
+						# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+
+			# print( "[***]", doc["id"], doc["title"], "... Done!" )
+			result.append( ( nDoc, { "from": doc["id"], "to": nSet } ) )
+
+		mClient.close()
+		return result
 
 
 	def _updateSurfaceFormsDictionary( self, sfDocuments ):
@@ -198,7 +221,7 @@ class NEDParser( P.Parser ):
 		:return: Number of non-empty surface form documents processed.
 		"""
 		requests = []  										# We'll use bulk writes to speed up process.
-		BATCH_SIZE = 200
+		BATCH_SIZE = 10000
 		totalRequests = 0
 		for sfDoc in sfDocuments:
 			if not sfDoc: continue							# Skip empty sf dictionaries.
