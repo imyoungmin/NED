@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from multiprocessing import Pool
+from pymongo import MongoClient
 import pymongo
 from urllib.parse import unquote
 import html
@@ -84,9 +85,10 @@ class NEDParser( P.Parser ):
 							documents = self._extractWikiPagesFromBZ2( bz2File.readlines(), keepDisambiguation=True, lowerCase=False )
 
 						# Process documents which contain regular entity pages and disambiguation pages.
-						rDocuments = []
-						for doc in documents:
-							rDocuments.append( self._extractWikilinks( doc ) )
+						pool = Pool()
+						rDocuments = pool.map( NEDParser._extractWikilinks, documents )  			# Each document object in its own thread.
+						pool.close()
+						pool.join()  # Close pool and wait for work to finish.
 
 						# Split rDocuments' tuples into surface form dicts and linking dicts.
 						sfDocuments = [rDoc[0] for rDoc in rDocuments if rDoc[0]]
@@ -123,7 +125,8 @@ class NEDParser( P.Parser ):
 		print( "[!] Collections for surface forms computations have been dropped" )
 
 
-	def _extractWikilinks( self, doc ):
+	@staticmethod
+	def _extractWikilinks( doc ):
 		"""
 		Parse inter-Wikilinks from an entity page or disambiguation page to obtain surface forms (by convention these will be lowercased).
 		Also, collect the IDs of entities that current document points to, as long as current doc is a non-disambiguatio page.
@@ -134,18 +137,21 @@ class NEDParser( P.Parser ):
 		nDoc = {}		# This dict stores the surface forms and their corresponding entity mappings with a reference count.
 		nSet = set()	# Stores the IDs of pages pointed to by this non-disambiguation document (e.g. nSet is empty for a disambiguation page).
 
+		mClient = MongoClient( "mongodb://localhost:27017/" )
+		mNED = mClient.ned
+		mEntity_ID = mNED["entity_id"]
 
 		# Treat disambiguation pages differently than regular valid pages.
 		surfaceForm = ""
 		isDisambiguation = False
-		m = self._DisambiguationPattern.match( doc["title"] )
+		m = P.Parser._DisambiguationPattern.match( doc["title"] )
 		if m is not None:
 			isDisambiguation = True									# We'll be processing a disambiguation page.
 			surfaceForm = m.group( 1 ).strip().lower()				# This will become the common surface name for all wikilinks within current disambiguation page.
 
 		for line in doc["lines"]:
-			line = self._ExternalLinkPattern.sub( r"\3", line )		# Remove external links to avoid false positives.
-			for matchTuple in self._LinkPattern.findall( line ):
+			line = P.Parser._ExternalLinkPattern.sub( r"\3", line )	# Remove external links to avoid false positives.
+			for matchTuple in P.Parser._LinkPattern.findall( line ):
 				entity = html.unescape( unquote( matchTuple[0] ) ).strip()	# Clean entity name: e.g. "B%20%26amp%3B%20W" -> "B &amp; W" -> "B & W".
 
 				if not isDisambiguation:
@@ -155,16 +161,16 @@ class NEDParser( P.Parser ):
 					continue
 
 				# Skip links to another disambiguation page or an invalid entity page.
-				if self._DisambiguationPattern.match( entity ) is None and self._SkipTitlePattern.match( entity ) is None:
+				if P.Parser._DisambiguationPattern.match( entity ) is None and P.Parser._SkipTitlePattern.match( entity ) is None:
 
 					record = None  									# Sentinel for found entity in DB.
 
 					# First check how many entities match the lowercase version given in link: we may have ALGOL and Algol...
-					n = self._mEntity_ID.find( { "e_l": entity.lower() } ).count()
+					n = mEntity_ID.find( { "e_l": entity.lower() } ).count()
 					if n == 1:										# One match?  Then retrieve entity ID.
-						record = self._mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
+						record = mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
 					elif n > 1:										# If more than one record, then Wikilink must match the true entity name: case sensitive.
-						record = self._mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
+						record = mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
 
 					if record:										# Process only those entities existing in entity_id collection.
 						eId = "m." + str( record["_id"] )
