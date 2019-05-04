@@ -22,6 +22,7 @@ if __name__ is "__main__":
 
 	# Compute surface forms and fill collections for NED.
 	nedParser = NP.NEDParser()
-	nedParser.initDBCollections()
-	nedParser.parseSFFromEntityNames()
-	nedParser.parseSFsAndLsFromWikilinks( _Extracted_XML )
+	# nedParser.initDBCollections()
+	# nedParser.parseSFFromEntityNames()
+	# nedParser.parseSFsAndLsFromWikilinks( _Extracted_XML )
+	nedParser.parseSFFromRedirectPages( _Multistream_Index, _Multistream_Dump )

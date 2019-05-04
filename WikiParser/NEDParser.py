@@ -2,11 +2,13 @@ import importlib
 import bz2
 import os
 import time
+import re
 from multiprocessing import Pool
 from pymongo import MongoClient
 import pymongo
 from urllib.parse import unquote
 import html
+import sys
 from . import Parser as P
 import Tokenizer
 importlib.reload( P )
@@ -17,6 +19,11 @@ class NEDParser( P.Parser ):
 	"""
 	Parsing Wikipedia extracted and multistream archives to construct the surface forms dictionary and the inter-links table.
 	"""
+
+
+	# Static members.
+	_TitlePattern = re.compile( r"<title>\s*(.+?)\s*</title>", re.I )
+	_RedirectTitlePattern = re.compile( r"<redirect\s+title=\"\s*(.+?)\s*\"\s*/>", re.I )
 
 
 	def __init__( self ):
@@ -125,12 +132,108 @@ class NEDParser( P.Parser ):
 
 	def parseSFFromRedirectPages( self, msIndexFilePath, msDumpFilePath ):
 		"""
-
-		:param msIndexFilePath:
-		:param msDumpFilePath:
-		:return:
+		Extract surface form from redirect pages.
+		We don't modify the ned_linking collection in this function since redirect pages are only aliases for entity pages.
+		:param msIndexFilePath: Multistream index file path (e.g. enwiki-20141106-pages-articles-multistream-index.txt).
+		:param msDumpFilePath: Multistream dump file path (e.g. enwiki-20141106-pages-articles-multistream.xml.bz2).
 		"""
-		pass	# TODO: Complete body.
+		print( "------- Creating surface forms from redirect pages -------" )
+
+		startTotalTime = time.time()
+		sfDocuments = []
+		with open( msIndexFilePath, "r", encoding="utf-8" ) as indexFile:
+			seekByte = -1
+			for lineNumber, line in enumerate( indexFile ):				# Read index line by line.
+				components = line.strip().split( ":" )					# [ByteStart, DocID, DocTitle]
+				newSeekByte = int( components[0] )						# Find the next seek byte start that is different to current (defines a block).
+
+				if seekByte == -1:										# First time reading seek byte from file.
+					seekByte = newSeekByte
+					continue
+
+				if newSeekByte != seekByte:																# Changed seek-byte?
+					count = newSeekByte - seekByte														# Number of bytes to read from bz2 stream.
+					sfDocuments.append( self._processMSBZ2Block( seekByte, count, msDumpFilePath ) )	# Read Wikipedia docs in this block.
+					seekByte = newSeekByte
+
+			# Process the last seek byte count = -1.
+			sfDocuments.append( self._processMSBZ2Block( seekByte, -1, msDumpFilePath ) )
+
+		endTotalTime = time.time()
+		print( "[!] Completed process for", len( sfDocuments ) ,"redirect surface forms in", endTotalTime - startTotalTime, "secs" )
+
+
+	def _processMSBZ2Block( self, seekByte, count, msDumpFilePath ):
+		"""
+		Read and process bytes from the multi-stream Wikipedia dump file.
+		:param seekByte: Starting byte point.
+		:param count: Number of bytes to read, or -1 to read everything from seekByte.
+		:param msDumpFilePath: Wikipedia multi-stream dump file path.
+		:return: A dictionary of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}
+		"""
+		startTime = time.time()
+
+		with open( msDumpFilePath, "rb" ) as bz2File:
+			bz2File.seek( seekByte )
+			block = bz2File.read( count )
+			dData = bz2.decompress( block ).decode( "utf-8" )
+
+		# Obtain the title and redirect titles from read block.
+		lines = dData.split( "\n" )
+		skipLine = False				# To avoid unnecessary checks.
+		title = None
+		nDoc = {}						# Output dictionary.
+		for line in lines:
+			line = line.strip()
+			if not line:				# Skip empty lines.
+				continue
+
+			if line == "</page>":							# End of document?
+				skipLine = False
+				title = None
+			elif not skipLine:
+				if not title:								# Find page title first.
+					m = self._TitlePattern.search( line )
+					if m:
+						title = m.group( 1 ).lower()  		# Now reading a <page>.  Make title a lowercase surface form.
+				else:
+					m = self._RedirectTitlePattern.search( line )	# Find redirect title.
+					if m:
+						entity = m.group( 1 )
+
+						# Check against DB that the referenced real-world entity exists in entity_id collection.
+						# Skip links to another disambiguation page or an invalid entity page.
+						if self._DisambiguationPattern.match( entity ) is None and self._SkipTitlePattern.match( entity ) is None:
+
+							record = None  							# Sentinel for found entity in DB.
+
+							# First check how many entities match the lowercase version given in link: we may have ALGOL and Algol...
+							n = self._mEntity_ID.find( { "e_l": entity.lower() } ).count()
+							if n == 1:  							# One match?  Then retrieve entity ID.
+								record = self._mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
+							elif n > 1:  							# If more than one record, then Wikilink must match the true entity name: case sensitive.
+								record = self._mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
+
+							if record:  							# Process only those entities existing in entity_id collection.
+								eId = "m." + str( record["_id"] )
+
+								# Creating entry in output dict.
+								if nDoc.get( title ) is None:
+									nDoc[title] = {}
+								if nDoc[title].get( eId ) is None:
+									nDoc[title][eId] = 0
+								nDoc[title][eId] += 1  				# Entity is referred to by this surface form one more time (i.e. increase count).
+							else:
+								print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+						else:
+							print( "[W] Skipping entry", title, "pointing to invalid entity", entity, file=sys.stderr )
+
+						skipLine = True
+					elif line.find( "<text", 0, 6 ) != -1:			# Reached the body of the page?
+						skipLine = True								# No need to continue checking for redirect until page ends in </page>.
+
+		endTime = time.time()
+		print( "[**] Processed", len( nDoc ), "redirect entries in block", seekByte, "in", endTime - startTime )
 
 
 	def initDBCollections( self ):
@@ -206,6 +309,8 @@ class NEDParser( P.Parser ):
 								nSet.add( record["_id"] )				# Keep track of page IDs pointed to by this non-disambiguation document.
 						# else:
 						# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+					else:
+						print( "[W] Skipping entry", surfaceForm, "pointing to invalid entity", entity, file=sys.stderr )
 
 			# print( "[***]", doc["id"], doc["title"], "... Done!" )
 			result.append( ( nDoc, { "from": doc["id"], "to": nSet } ) )
@@ -270,39 +375,3 @@ class NEDParser( P.Parser ):
 			self._mNed_Linking.bulk_write( requests )	# Process remaining requests.
 
 		print( "Done with", totalRequests, "requests sent!" )
-
-
-# def go():
-# 	"""
-# 	Launch Wikipedia parsing process.
-# 	:return:
-# 	"""
-# 	print( "[!] Started to parse Wikipedia files" )
-# 	with open( _Multistream_Index, "r", encoding="utf-8" ) as indexFile:
-# 		seekByte = -1
-# 		for lineNumber, line in enumerate( indexFile ):			# Read index line by line.
-# 			components = line.strip().split( ":" )				# [ByteStart, DocID, DocTitle]
-# 			newSeekByte = int( components[0] )					# Find the next seek byte start that is different to current (defines a block).
-#
-# 			if seekByte == -1:									# First time reading seek byte from file.
-# 				seekByte = newSeekByte
-# 				continue
-#
-# 			if newSeekByte != seekByte:							# Changed seek-byte?
-# 				count = newSeekByte - seekByte					# Number of bytes to read from bz2 stream.
-# 				_processBZ2Block( seekByte, count )		# Read Wikipedia docs in this block.
-# 				seekByte = newSeekByte
-# 				break	# TODO: Remove to process all blocks.
-#
-# 		# TODO: Process the last seek byte count = -1.
-#
-# 	print( "[!] Finished parsing Wikipedia" )
-#
-#
-# def _processBZ2Block( seekByte, count ):
-# 	with open( _Multistream_Dump, "rb" ) as bz2File:
-# 		bz2File.seek( seekByte )
-# 		block = bz2File.read( count )
-#
-# 		dData = bz2.decompress( block )
-# 		print( dData )
