@@ -4,6 +4,7 @@ import os
 import time
 import re
 from multiprocessing import Pool
+from functools import partial
 from pymongo import MongoClient
 import pymongo
 from urllib.parse import unquote
@@ -139,8 +140,10 @@ class NEDParser( P.Parser ):
 		"""
 		print( "------- Creating surface forms from redirect pages -------" )
 
-		startTotalTime = time.time()
 		sfDocuments = []
+		seekRequests = []												# Accumulate block indices for multithreading processing.
+		SEEK_REQUESTS_BLOCK_SIZE = 1000
+		requestId = 0
 		with open( msIndexFilePath, "r", encoding="utf-8" ) as indexFile:
 			seekByte = -1
 			for lineNumber, line in enumerate( indexFile ):				# Read index line by line.
@@ -151,27 +154,52 @@ class NEDParser( P.Parser ):
 					seekByte = newSeekByte
 					continue
 
-				if newSeekByte != seekByte:																# Changed seek-byte?
-					count = newSeekByte - seekByte														# Number of bytes to read from bz2 stream.
-					sfDocuments.append( self._processMSBZ2Block( seekByte, count, msDumpFilePath ) )	# Read Wikipedia docs in this block.
+				if newSeekByte != seekByte:									# Changed seek-byte?
+					requestId += 1
+					count = newSeekByte - seekByte							# Number of bytes to read from bz2 stream.
+					seekRequests.append( ( requestId, seekByte, count ) )	# Append new block boundaries.
+
+					if len( seekRequests ) % SEEK_REQUESTS_BLOCK_SIZE == 0:
+						print( "[*]", len( seekRequests ), "request blocks collected" )
+						break
+
 					seekByte = newSeekByte
 
-			# Process the last seek byte count = -1.
-			sfDocuments.append( self._processMSBZ2Block( seekByte, -1, msDumpFilePath ) )
+			# Add the last seek byte count = -1.
+			# seekRequests.append( ( requestId, seekByte, -1 ) )
+			print( "[*]", len( seekRequests ), "request blocks collected" )
+
+		startTotalTime = time.time()
+
+		pool = Pool()
+		sfDocuments = pool.map( partial( NEDParser._processMSBZ2Block, msDumpFilePath=msDumpFilePath ), seekRequests )  # Each block tuple in its own thread.
+		pool.close()
+		pool.join()
+
+		# TODO: Update ned_dictionary collection.
+		print( sys.getsizeof( sfDocuments ) / 1024 / 1024 )
 
 		endTotalTime = time.time()
 		print( "[!] Completed process for", len( sfDocuments ) ,"redirect surface forms in", endTotalTime - startTotalTime, "secs" )
 
 
-	def _processMSBZ2Block( self, seekByte, count, msDumpFilePath ):
+	@staticmethod
+	def _processMSBZ2Block( block, msDumpFilePath ):
 		"""
 		Read and process bytes from the multi-stream Wikipedia dump file.
-		:param seekByte: Starting byte point.
-		:param count: Number of bytes to read, or -1 to read everything from seekByte.
+		:param block: A tuple containing (requestId, seekByte: Starting byte point, count: Number of bytes to read, or -1 to read everything from seekByte).
 		:param msDumpFilePath: Wikipedia multi-stream dump file path.
 		:return: A dictionary of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}
 		"""
 		startTime = time.time()
+
+		mClient = MongoClient( "mongodb://localhost:27017/" )  # One single connection to rule all requests in this block.
+		mNED = mClient.ned
+		mEntity_ID = mNED["entity_id"]
+
+		requestId = block[0]
+		seekByte = block[1]
+		count = block[2]
 
 		with open( msDumpFilePath, "rb" ) as bz2File:
 			bz2File.seek( seekByte )
@@ -193,28 +221,28 @@ class NEDParser( P.Parser ):
 				title = None
 			elif not skipLine:
 				if not title:								# Find page title first.
-					m = self._TitlePattern.search( line )
+					m = NEDParser._TitlePattern.search( line )
 					if m:
-						title = m.group( 1 ).lower()  		# Now reading a <page>.  Make title a lowercase surface form.
+						title = m.group( 1 ).lower()  					# Now reading a <page>.  Make title a lowercase surface form.
 				else:
-					m = self._RedirectTitlePattern.search( line )	# Find redirect title.
+					m = NEDParser._RedirectTitlePattern.search( line )	# Find redirect title.
 					if m:
 						entity = m.group( 1 )
 
 						# Check against DB that the referenced real-world entity exists in entity_id collection.
 						# Skip links to another disambiguation page or an invalid entity page.
-						if self._DisambiguationPattern.match( entity ) is None and self._SkipTitlePattern.match( entity ) is None:
+						if P.Parser._DisambiguationPattern.match( entity ) is None and P.Parser._SkipTitlePattern.match( entity ) is None:
 
-							record = None  							# Sentinel for found entity in DB.
+							record = None  								# Sentinel for found entity in DB.
 
 							# First check how many entities match the lowercase version given in link: we may have ALGOL and Algol...
-							n = self._mEntity_ID.find( { "e_l": entity.lower() } ).count()
-							if n == 1:  							# One match?  Then retrieve entity ID.
-								record = self._mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
-							elif n > 1:  							# If more than one record, then Wikilink must match the true entity name: case sensitive.
-								record = self._mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
+							n = mEntity_ID.find( { "e_l": entity.lower() } ).count()
+							if n == 1:  								# One match?  Then retrieve entity ID.
+								record = mEntity_ID.find_one( { "e_l": entity.lower() }, projection={ "_id": True } )
+							elif n > 1:  								# If more than one record, then Wikilink must match the true entity name: case sensitive.
+								record = mEntity_ID.find_one( { "e": entity }, projection={ "_id": True } )
 
-							if record:  							# Process only those entities existing in entity_id collection.
+							if record:  								# Process only those entities existing in entity_id collection.
 								eId = "m." + str( record["_id"] )
 
 								# Creating entry in output dict.
@@ -223,17 +251,19 @@ class NEDParser( P.Parser ):
 								if nDoc[title].get( eId ) is None:
 									nDoc[title][eId] = 0
 								nDoc[title][eId] += 1  				# Entity is referred to by this surface form one more time (i.e. increase count).
-							else:
-								print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
-						else:
-							print( "[W] Skipping entry", title, "pointing to invalid entity", entity, file=sys.stderr )
+							# else:
+							# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+						# else:
+						# 	print( "[W] Skipping entry", title, "pointing to invalid entity", entity, file=sys.stderr )
 
-						skipLine = True
+						skipLine = True								# Found what we wanted... skip the rest of the page.
 					elif line.find( "<text", 0, 6 ) != -1:			# Reached the body of the page?
 						skipLine = True								# No need to continue checking for redirect until page ends in </page>.
 
+		mClient.close()
 		endTime = time.time()
-		print( "[**] Processed", len( nDoc ), "redirect entries in block", seekByte, "in", endTime - startTime )
+		print( "[**] Processed", len( nDoc ), "redirect entries in block", requestId, "in", endTime - startTime )
+		return nDoc
 
 
 	def initDBCollections( self ):
