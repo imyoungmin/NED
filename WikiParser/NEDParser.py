@@ -4,7 +4,6 @@ import os
 import time
 import re
 from multiprocessing import Pool
-from functools import partial
 from pymongo import MongoClient
 import pymongo
 from urllib.parse import unquote
@@ -140,55 +139,72 @@ class NEDParser( P.Parser ):
 		"""
 		print( "------- Creating surface forms from redirect pages -------" )
 
-		sfDocuments = []
-		seekRequests = []												# Accumulate block indices for multithreading processing.
-		SEEK_REQUESTS_BLOCK_SIZE = 1000
-		requestId = 0
-		with open( msIndexFilePath, "r", encoding="utf-8" ) as indexFile:
-			seekByte = -1
-			for lineNumber, line in enumerate( indexFile ):				# Read index line by line.
-				components = line.strip().split( ":" )					# [ByteStart, DocID, DocTitle]
-				newSeekByte = int( components[0] )						# Find the next seek byte start that is different to current (defines a block).
-
-				if seekByte == -1:										# First time reading seek byte from file.
-					seekByte = newSeekByte
-					continue
-
-				if newSeekByte != seekByte:									# Changed seek-byte?
-					requestId += 1
-					count = newSeekByte - seekByte							# Number of bytes to read from bz2 stream.
-					seekRequests.append( ( requestId, seekByte, count ) )	# Append new block boundaries.
-
-					if len( seekRequests ) % SEEK_REQUESTS_BLOCK_SIZE == 0:
-						print( "[*]", len( seekRequests ), "request blocks collected" )
-						break
-
-					seekByte = newSeekByte
-
-			# Add the last seek byte count = -1.
-			# seekRequests.append( ( requestId, seekByte, -1 ) )
-			print( "[*]", len( seekRequests ), "request blocks collected" )
-
 		startTotalTime = time.time()
+		startTime = time.time()
+		blockRequests = []													# Accumulate blocks for multithreading processing.
+		REQUESTS_BLOCK_COUNT = 1000
+		requestId = 0
+		with open( msDumpFilePath, "rb" ) as bz2File:
+			with open( msIndexFilePath, "r", encoding="utf-8" ) as indexFile:
+				seekByte = -1
+				for lineNumber, line in enumerate( indexFile ):				# Read index line by line.
+					components = line.strip().split( ":" )					# [ByteStart, DocID, DocTitle]
+					newSeekByte = int( components[0] )						# Find the next seek byte start that is different to current (defines a block).
 
+					if seekByte == -1:										# First time reading seek byte from file.
+						seekByte = newSeekByte
+						continue
+
+					if newSeekByte != seekByte:									# Changed seek-byte?
+						requestId += 1
+						count = newSeekByte - seekByte							# Number of bytes to read from bz2 stream.
+
+						bz2File.seek( seekByte )								# Read block of data.
+						block = bz2File.read( count )
+						dData = bz2.decompress( block ).decode( "utf-8" )
+						blockRequests.append( (requestId, dData) )				# Append new block to requests.
+
+						if len( blockRequests ) == REQUESTS_BLOCK_COUNT:		# Accumulate REQUESTS_BLOCK_COUNT requests for incremental parsing.
+							self._parseMSBZ2BlockRequests( blockRequests )
+							print( "[*]", len( blockRequests ), "request blocks starting at byte", seekByte, "parsed after", time.time() - startTime, "secs" )
+							blockRequests = []
+							startTime = time.time()
+
+						seekByte = newSeekByte
+
+				# Add the last seek byte with count = -1 to read all until EOF.
+				requestId += 1
+				bz2File.seek( seekByte )  										# Read block of data.
+				block = bz2File.read( -1 )
+				dData = bz2.decompress( block ).decode( "utf-8" )
+				blockRequests.append( (requestId, dData) )  					# Append new block to requests.
+
+				self._parseMSBZ2BlockRequests( blockRequests )					# And parse this last block.
+				print( "[*]", len( blockRequests ), "request blocks starting at byte", seekByte, "parsed after", time.time() - startTime, "secs" )
+
+		endTotalTime = time.time()
+		print( "[!] Completed process for redirect surface forms in", endTotalTime - startTotalTime, "secs" )
+
+
+	def _parseMSBZ2BlockRequests( self, requests ):
+		"""
+		Read surface forms from blocks of Wikipedia documents obtained from the BZ2 multi-stream dump file.
+		:param requests: A list of tuples of the form (requestID, blockStringData)
+		"""
 		pool = Pool()
-		sfDocuments = pool.map( partial( NEDParser._processMSBZ2Block, msDumpFilePath=msDumpFilePath ), seekRequests )  # Each block tuple in its own thread.
+		sfDocuments = pool.map( NEDParser._processMSBZ2Block, requests )  		# Each block request tuple in its own thread.
 		pool.close()
 		pool.join()
 
-		# TODO: Update ned_dictionary collection.
-		print( sys.getsizeof( sfDocuments ) / 1024 / 1024 )
-
-		endTotalTime = time.time()
-		print( "[!] Completed process for", len( sfDocuments ) ,"redirect surface forms in", endTotalTime - startTotalTime, "secs" )
+		# Update ned_dictionary collection.
+		self._updateSurfaceFormsDictionary( sfDocuments )
 
 
 	@staticmethod
-	def _processMSBZ2Block( block, msDumpFilePath ):
+	def _processMSBZ2Block( block ):
 		"""
-		Read and process bytes from the multi-stream Wikipedia dump file.
-		:param block: A tuple containing (requestId, seekByte: Starting byte point, count: Number of bytes to read, or -1 to read everything from seekByte).
-		:param msDumpFilePath: Wikipedia multi-stream dump file path.
+		Read and process data from a block in multi-stream Wikipedia dump file.
+		:param block: A tuple containing (requestId, string block of data).
 		:return: A dictionary of the form {"sf1":{"m.EID1":int,..., "m.EIDn":int}, "sf2":{"m.EID1":int,..., "m.EIDn":int}, ...}
 		"""
 		startTime = time.time()
@@ -198,13 +214,7 @@ class NEDParser( P.Parser ):
 		mEntity_ID = mNED["entity_id"]
 
 		requestId = block[0]
-		seekByte = block[1]
-		count = block[2]
-
-		with open( msDumpFilePath, "rb" ) as bz2File:
-			bz2File.seek( seekByte )
-			block = bz2File.read( count )
-			dData = bz2.decompress( block ).decode( "utf-8" )
+		dData = block[1]
 
 		# Obtain the title and redirect titles from read block.
 		lines = dData.split( "\n" )
@@ -337,8 +347,8 @@ class NEDParser( P.Parser ):
 
 							if not isDisambiguation:
 								nSet.add( record["_id"] )				# Keep track of page IDs pointed to by this non-disambiguation document.
-						# else:
-						# 	print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
+						else:
+							print( "[!] Entity", entity, "doesn't exist in the DB!", file=sys.stderr )
 					else:
 						print( "[W] Skipping entry", surfaceForm, "pointing to invalid entity", entity, file=sys.stderr )
 
