@@ -1,5 +1,23 @@
 from pymongo import MongoClient
 from typing import Set, Dict
+import numpy as np
+
+
+class Entity:
+	"""
+	Implementation of an entity.  We want to have at most 1 object per entity across surface forms' candidates.
+	"""
+
+	def __init__( self, eId: int, name: str, pointedToBy: Set[int] ):
+		"""
+		Constructor.
+		:param eId: Entity ID.
+		:param name: Entity name as it appears in its Wikipedia article.
+		:param pointedToBy: Set of Wikipedia articles (i.e. entity IDs) pointing to this entity.
+		"""
+		self.id = eId
+		self.name = name
+		self.pointedToBy = pointedToBy
 
 
 class Candidate:
@@ -7,18 +25,14 @@ class Candidate:
 	Candidate mapping implementation.
 	"""
 
-	def __init__( self, eId: int, name: str, count: int, pointedToBy: Set[int] ):
+	def __init__( self, eId: int, count: int ):
 		"""
 		Constructor.
 		:param eId: Entity ID.
-		:param name: Entity name.
 		:param count: Number of entities being referred to by (outter/caller) surface form.
-		:param pointedToBy: Set of entity IDs that have a link to this candidate.
 		"""
 		self.id = eId
-		self.name = name
 		self.count = count
-		self.pointedToBy = pointedToBy
 
 
 class NED:
@@ -45,7 +59,11 @@ class NED:
 
 		# Retrieve total number of entities recorded in DB.
 		self._WP = self._mEntity_ID.count()
+		self._LOG_WP = np.log( self._WP )						# Log used in topic relatedness metric.
 		print( "NED initialized with", self._WP, "entities" )
+
+		# Initialize map of entities (as a cache).
+		self._entityMap = {}
 
 
 	def getCandidatesForEntityMention( self, m_i: str ) -> Dict[int, Candidate]:
@@ -59,8 +77,13 @@ class NED:
 		if record1:
 			for r_j in record1["m"]:
 				r = int( r_j )
-				record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )
-				result[r] = Candidate( r, record2["e"], record1["m"][r_j], self._getPagesLikingTo( r ) )	# Build resulting candidate object.
+
+				# Check the cache for candidate entity.
+				if self._entityMap.get( r ) is None:
+					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity in cache.
+					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ) )			# And retrieve other pages linking to new entity.
+
+				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
 
 		print( "[*] Collected", len( result ), "candidate entities for [", m_i, "]" )
 		return result			# Empty if no candidates were found for given entity mention.
@@ -79,11 +102,17 @@ class NED:
 		return U
 
 
-	def topicalRelatedness( self, u1: int, u2: int ):
+	def topicalRelatedness( self, u1: Entity, u2: Entity ) -> float:
 		"""
 		Calculate the Wikipedia topical relatedness between two entities.
-		:param u1: Entity ID 1.
-		:param u2: Entity ID 2
+		:param u1: First entity.
+		:param u2: Second entity.
 		:return: 1 - \frac{log(max(|U_1|, |U_2|)) - log(|U_1 \intersect U_2|)}{log|WP| - log(min(|U_1|, |U_2|))}
 		"""
-		pass
+		lU1 = len( u1.pointedToBy )
+		lU2 = len( u2.pointedToBy )
+		lIntersection = len( u1.pointedToBy.intersection( u2.pointedToBy ) )
+		if lIntersection > 0:
+			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
+		else:
+			return 0.0
