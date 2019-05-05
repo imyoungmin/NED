@@ -7,4 +7,6 @@ if __name__ is "__main__":
 	candidatesNBA = ned.getCandidatesForEntityMention( "NBA" )
 	candidatesAllen = ned.getCandidatesForEntityMention( "Tony Allen" )
 
+	print( "Done!" )
+
 

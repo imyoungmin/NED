@@ -33,6 +33,7 @@ class Candidate:
 		"""
 		self.id = eId
 		self.count = count
+		self.priorProbability = 0.0		# To be updated when collecting candidates for a surface form.
 
 
 class NED:
@@ -69,12 +70,14 @@ class NED:
 	def getCandidatesForEntityMention( self, m_i: str ) -> Dict[int, Candidate]:
 		"""
 		Retrieve candidate mapping entities for given entity mention.
+		Calculate the prior probability at the same time.
 		:param m_i: Entity mention (a.k.a surface form).
 		:return: A dict {e_1_id:(str, int), "e_2_id":(str, int),...}, where the tuples contain the mapping name and count.
 		"""
 		result = {}
 		record1 = self._mNed_Dictionary.find_one( { "_id": m_i.lower() }, projection={ "m": True } )
 		if record1:
+			total = 0											# Accumulate reference count for this surface form by the candidate mappings.
 			for r_j in record1["m"]:
 				r = int( r_j )
 
@@ -84,6 +87,11 @@ class NED:
 					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ) )			# And retrieve other pages linking to new entity.
 
 				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
+				total += record1["m"][r_j]
+
+			# Update prior probability.
+			for r in result:
+				result[r].priorProbability = result[r].count / total
 
 		print( "[*] Collected", len( result ), "candidate entities for [", m_i, "]" )
 		return result			# Empty if no candidates were found for given entity mention.
