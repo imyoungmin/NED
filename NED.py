@@ -1,5 +1,6 @@
 from pymongo import MongoClient
 from typing import Set, Dict
+import sys
 import numpy as np
 
 
@@ -34,6 +35,24 @@ class Candidate:
 		self.id = eId
 		self.count = count
 		self.priorProbability = 0.0		# To be updated when collecting candidates for a surface form.
+		self.contextSimilarity = 0.0	# TODO: To be updated with the homonym function.
+		self.topicalCoherence = 0.0		# To be updated during the iterative substitution algorithm.
+
+
+class NamedEntity:
+	"""
+	Named entity object.
+	"""
+
+	def __init__( self, context: Set[str], candidates: Dict[int, Candidate] ):
+		"""
+		Constructor.
+		:param context: Context bag of words around entity mention.
+		:param candidates: Map of candidate mapping entities.
+		"""
+		self.context = { w: True for w in context }		# Make it into a dict => {"term1": True, "term2": True, ...}
+		self.candidates = candidates
+		self.mappingEntityId = 0						# Final entity mapping.
 
 
 class NED:
@@ -64,15 +83,23 @@ class NED:
 		print( "NED initialized with", self._WP, "entities" )
 
 		# Initialize map of entities (as a cache).
-		self._entityMap = {}
+		self._entityMap: Dict[int, Entity] = {}
+
+		# Named entities map {"namedEntity1": NamedEntity1, "namedEntity2": NamedEntity2, ...}.
+		self._namedEntities: Dict[str, NamedEntity] = {}
+
+		# Initial score constants.
+		self._alpha = 0.25
+		self._beta = 0.25
+		self._gamma = 0.5
 
 
-	def getCandidatesForEntityMention( self, m_i: str ) -> Dict[int, Candidate]:
+	def getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
 		"""
-		Retrieve candidate mapping entities for given entity mention.
+		Retrieve candidate mapping entities for given named entity.
 		Calculate the prior probability at the same time.
 		:param m_i: Entity mention (a.k.a surface form).
-		:return: A dict {e_1_id:(str, int), "e_2_id":(str, int),...}, where the tuples contain the mapping name and count.
+		:return: A dict {e_1_id:Candidate_1, e_2_id:Candidate_2,...}.
 		"""
 		result = {}
 		record1 = self._mNed_Dictionary.find_one( { "_id": m_i.lower() }, projection={ "m": True } )
@@ -110,17 +137,114 @@ class NED:
 		return U
 
 
-	def topicalRelatedness( self, u1: Entity, u2: Entity ) -> float:
+	def topicalRelatedness( self, u1: int, u2: int ) -> float:
 		"""
 		Calculate the Wikipedia topical relatedness between two entities.
-		:param u1: First entity.
-		:param u2: Second entity.
+		:param u1: First entity ID.
+		:param u2: Second entity ID.
 		:return: 1 - \frac{log(max(|U_1|, |U_2|)) - log(|U_1 \intersect U_2|)}{log|WP| - log(min(|U_1|, |U_2|))}
 		"""
-		lU1 = len( u1.pointedToBy )
-		lU2 = len( u2.pointedToBy )
-		lIntersection = len( u1.pointedToBy.intersection( u2.pointedToBy ) )
+		lU1 = len( self._entityMap[u1].pointedToBy )
+		lU2 = len( self._entityMap[u2].pointedToBy )
+		lIntersection = len( self._entityMap[u1].pointedToBy.intersection( self._entityMap[u2].pointedToBy ) )
 		if lIntersection > 0:
 			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
 		else:
 			return 0.0
+
+
+	def contextSimilarity( self, bow: Dict[str, bool], eId: int ) -> float:
+		"""
+		Calculate the context similarity between the terms in a window around the entity mention and a true entity.
+		:param bow: Bag of words of context around entity mention: {"w1": True, "w2": True, ...}
+		:param eId: Entity ID.
+		:return: Cosine similarity between BOW and entity document.
+		"""
+		# Get the term weights for input entity ID.
+		record = self._mTf_Documents.find_one( { "_id", eId } )
+		if record is None:
+			print( "[x] Context similarity falta error: Entity", eId, "doesn't exist in the tf_documents collection!", file=sys.stderr )
+			return 0.0
+
+		# Use modified TF-IDF by taking the query BOW as boolean indicators, and just accumulate TF weights in entity document.
+		similarity = 0.0
+		for i, term in record["t"]:
+			if bow.get( term ) is not None:
+				similarity += record["w"][i]
+
+		return similarity
+
+
+	def topicalCoherence( self, surfaceForm: str, M: Dict[str: int] ) -> float:
+		"""
+		Compute topical coherence of mapping entity for given surface form with respect to mapping entities of the rest.
+		:param surfaceForm: Central surface form whose (candidate) mapping entity we task as reference.
+		:param M: Mappings for all surface forms (including the central one).
+		:return: Coh(r_{i,j}) = \frac{1}{|M| - 1} \sum_{c=1, c\nej}^{|M|}TR(r_{i,j}, e_{i,c}).
+		"""
+		totalTR = 0
+		for sf in M:
+			if sf != surfaceForm:
+				totalTR += self.topicalRelatedness( M[surfaceForm], M[sf] )
+		return  totalTR / ( len( M ) - 1 )
+
+
+	def totalInitialScore( self, M: Dict[str: int] ) -> float:
+		"""
+		Calculate the total initial score for a given set of mapping entities.
+		This function is used in the iterative substitution algorithm to evaluate different candidates performance.
+		:param M: Mapping entities to each surface form.
+		:return: \sum_i^{|M|} ( \alpha * Pp(e_i) + \beta * Sim(e_i) + \gamma * Coh(e_i) )
+		"""
+		totalScore = 0
+		for sf in M:
+			e = self._namedEntities[sf].candidates[M[sf]]
+			totalScore += self._alpha * e.priorProbability \
+						  + self._beta * e.contextSimilarity \
+						  + self._gamma * self.topicalCoherence( sf, M )
+		return totalScore
+
+
+	def iterativeSubstitutionAlgorithm( self ):
+		"""
+		Solve for the best entity mappings for all named entities in order to have an initial score.
+		"""
+		# Pick the candidate with maximum prior probability as first approximation to mapping entity.
+		for ne in self._namedEntities:
+			mostPopularProb = 0
+			for cm in self._namedEntities[ne].candidates:
+				if self._namedEntities[ne].candidates[cm].priorProbability > mostPopularProb:
+					self._namedEntities[ne].mappingEntityId = cm
+
+		iteration = 1
+		M: Dict[str: int] = { ne: self._namedEntities[ne].mappingEntityId for ne in self._namedEntities }	# Surface forms and respective mapping entities.
+		bestTIS = self.totalInitialScore( M )
+
+		print( "[ISA][", iteration,"] Initial score starts at", bestTIS )
+
+		while True:
+			# Find the candidate substition that increases the most the total initial score among all candidates and all surface forms.
+			foundBetterScore = False
+			bestNE = 0		# Best surface form and candidate mapping.
+			bestCM = 0
+			for ne in self._namedEntities:
+				M = { ne: self._namedEntities[ne].mappingEntityId for ne in self._namedEntities }  # Try-out mapping entities.
+				for cm in self._namedEntities[ne].candidates:
+					if cm != self._namedEntities[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
+						M[ne] = cm											# Check this candidate substitution.
+
+						tis = self.totalInitialScore( M )
+						if tis > bestTIS:									# Is it improving?
+							foundBetterScore = True
+							bestNE = ne
+							bestCM = cm
+							bestTIS = tis
+
+			if foundBetterScore > 0:										# Did score ever increase?
+				self._namedEntities[bestNE].mappingEntityId = bestCM		# New best mapping.
+				print( "[ISA][", iteration ,"] Score increased to", bestTIS )
+				iteration += 1
+			else:
+				break						# Stop when we detect a negative performance.
+
+		print( "[ISA] Finalized greedy optimization with an initial score of", bestTIS )
