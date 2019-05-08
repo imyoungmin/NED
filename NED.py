@@ -1,7 +1,11 @@
 from pymongo import MongoClient
-from typing import Set, Dict
+from typing import Set, Dict, Tuple, List
 import sys
 import numpy as np
+from WikiParser import Parser as P
+import importlib
+
+importlib.reload( P )
 
 
 class Entity:
@@ -94,6 +98,51 @@ class NED:
 		self._gamma = 0.5
 
 
+	def go( self, filePath: str ) -> Dict[str, Tuple[int, str]]:
+		"""
+		Disambiguate indentified entities given in input text file.
+		:param filePath: File containing text with named entities enclosed in [[.]].
+		:return: Dictionary with surface forms and mapping entities
+		"""
+		with open( filePath, "r", encoding="utf-8" ) as file:
+			text = file.read().lower()
+
+		### Extract named entities and tokenize text ###
+
+		tokens: List[str] = []
+		surfaceForms: Dict[str, List[Tuple[int, int]]] = {}		# Saves surface form and where in the tokens list it appears: [start, end).
+		i = 0								# Start from beginning of text.
+		s = text.find( "[[", i )
+		while s != -1:
+			e = text.find( "]]", s )
+			if e == -1:						# Missing closing ]]?
+				print( "[x] Missing ']]' to enclose a named entity.  Check the input text!", file=sys.stderr )
+				sys.exit( 1 )
+
+			sf = text[s+2:e]				# The surface form.
+			if i < s:						# Tokenize text before named entity.
+				tokens += P.Parser.tokenizeText( text[i:s] )
+			sfTokens = P.Parser.tokenizeText( sf )				# Surface form tokens.
+			sfTokensStart = len( tokens )
+			tokens += sfTokens
+			sfTokensEnd = len( tokens )
+
+			# Add named entity.
+			if surfaceForms.get( sf ) is None:
+				surfaceForms[sf] = []
+			surfaceForms[sf].append( ( sfTokensStart, sfTokensEnd ) )
+
+			i = e + 2
+			s = text.find( "[[", i )
+
+		# Tokenize rest of text.
+		if i < len( text ):
+			tokens += P.Parser.tokenizeText( text[i:] )
+
+		# TODO: Register candidates and windows of tokens around surface forms.
+		return {}
+
+
 	def getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
 		"""
 		Retrieve candidate mapping entities for given named entity.
@@ -175,7 +224,7 @@ class NED:
 		return similarity
 
 
-	def topicalCoherence( self, surfaceForm: str, M: Dict[str: int] ) -> float:
+	def topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
 		"""
 		Compute topical coherence of mapping entity for given surface form with respect to mapping entities of the rest.
 		:param surfaceForm: Central surface form whose (candidate) mapping entity we task as reference.
@@ -189,7 +238,7 @@ class NED:
 		return  totalTR / ( len( M ) - 1 )
 
 
-	def totalInitialScore( self, M: Dict[str: int] ) -> float:
+	def totalInitialScore( self, M: Dict[str, int] ) -> float:
 		"""
 		Calculate the total initial score for a given set of mapping entities.
 		This function is used in the iterative substitution algorithm to evaluate different candidates performance.

@@ -8,6 +8,7 @@ from abc import ABCMeta, abstractmethod
 from bs4 import BeautifulSoup
 import warnings
 import sys
+from typing import List
 import Tokenizer
 importlib.reload( Tokenizer )
 
@@ -108,6 +109,36 @@ class Parser( metaclass=ABCMeta ):
 
 
 	@staticmethod
+	def tokenizeText( text: str ) -> List[str]:
+		"""
+		Tokenize text. This method provide uniformity in tokenization in both an external caller and the Wikipedia parser.
+		:param text: String to tokenize.
+		:return: List of tokens.
+		"""
+		tokens = Tokenizer.tokenize( text )				# Preferably, tokenize a lower-cased version of text.
+		return Parser.curateTokens( tokens )			# Curate tokens.
+
+
+	@staticmethod
+	def curateTokens( tkns: List[str] ) -> List[str]:
+		"""
+		Verify tokens comply with some constraints.
+		:param tkns: List of tokens.
+		:return: Curated list of tokens.
+		"""
+		tokens = [w for w in tkns if not w in Parser._stopWords]  					# Remove stop words.
+
+		result: List[str] = []
+		for token in tokens:
+			if len( token ) <= 128:  												# Skip too long tokens.
+				if Parser._UrlPattern.search( token ) is None:  					# Skip URLs.
+					if Parser._PunctuationOnlyPattern.match( token ) is None:  		# Skip patterns like '...' and '#' and '--'
+						result.append( Parser._porterStemmer.stem( token, 0, len( token ) - 1 ) )  # Stem token.
+
+		return result
+
+
+	@staticmethod
 	def tokenizeDoc( doc, normalizeTF=True ):
 		"""
 		Tokenize a document object.
@@ -119,24 +150,18 @@ class Parser( metaclass=ABCMeta ):
 
 		maxFreq = 0
 		for line in doc["lines"]:
-			soup = BeautifulSoup( line, "html.parser" )  									# Get lines with just text: no <tags/>.
+			soup = BeautifulSoup( line, "html.parser" )  				# Get lines with just text: no <tags/>.
 			line = soup.getText().strip()
 			if not line: continue
 
-			tokens = Tokenizer.tokenize( line )  											# Tokenize a lower-cased version of article text.
-			tokens = [w for w in tokens if not w in Parser._stopWords]  # Remove stop words.
+			tokens = Parser.tokenizeText( line )  						# Tokenize a lower-cased version of article text.
 
-			for token in tokens:
-				if len( token ) <= 128:  													# Skip too long tokens.
-					if Parser._UrlPattern.search( token ) is None:  						# Skip URLs.
-						if Parser._PunctuationOnlyPattern.match( token ) is None:  			# Skip patterns like '...' and '#' and '--'
-							t = Parser._porterStemmer.stem( token, 0, len( token ) - 1 )  	# Stem token.
-							if nDoc["tokens"].get( t ) is None:
-								nDoc["tokens"][t] = 1  										# Create token in dictionary if it doesn't exist.
-							else:
-								nDoc["tokens"][t] += 1
-							maxFreq = max( nDoc["tokens"][t],
-										   maxFreq )  # Keep track of maximum term frequency within document.
+			for t in tokens:
+				if nDoc["tokens"].get( t ) is None:
+					nDoc["tokens"][t] = 1  								# Create token in dictionary if it doesn't exist.
+				else:
+					nDoc["tokens"][t] += 1
+				maxFreq = max( nDoc["tokens"][t], maxFreq )  			# Keep track of maximum term frequency within document.
 
 		if maxFreq == 0:
 			print( "[W] Empty document:", nDoc, file=sys.stderr )
