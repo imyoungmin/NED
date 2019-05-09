@@ -2,14 +2,11 @@ import importlib
 import bz2
 import os
 import time
-import math
 import sys
 from typing import Dict
 from multiprocessing import Pool
 import pymongo
 from . import Parser as P
-import Tokenizer
-importlib.reload( Tokenizer )
 importlib.reload( P )
 
 
@@ -37,12 +34,16 @@ class SIFParser( P.Parser ):
 		"""
 		Populate the cache word map.
 		"""
+		print( "[!] Loading unique terms from word_embeddings collection... " )
 		startTime = time.time()
-		print( "[!] Loading unique terms from word_embeddings collection... ", end="" )
+		i = 0
 		for t in self._mWord_Embeddings.find( {}, projection={ "_id": True } ):
 			self._wordMap[t["_id"]] = True
+			i += 1
+			if i % 100000 == 0:
+				print( "  Loaded", i )
 		endTime = time.time()
-		print( "Done after", endTime - startTime, "secs" )
+		print( "[!] Done loading", i, "tokens after", endTime - startTime, "secs" )
 
 
 	def buildWordEmbeddings( self, filePath: str ):
@@ -89,6 +90,7 @@ class SIFParser( P.Parser ):
 		Afterwards, use computeIDFFromDocumentFrequencies() and computeAndNormalizeTermWeights() to finalize TFIDF structs.
 		:param extractedDir: Directory where the extracted BZ2 files are located: must end in "/".
 		"""
+		print( "------- Building SIF collections -------" )
 		nEntities = 0												# Total number of tokenized documents in this pass.
 
 		startTotalTime = time.time()
@@ -124,75 +126,6 @@ class SIFParser( P.Parser ):
 		print( "[!] Total number of entities:", nEntities, "in", endTotalTime - startTotalTime, "secs" )
 
 
-	def computeIDFFromDocumentFrequencies( self ):
-		"""
-		Use the document frequencies stored in the idf_dictionary collection to calculate log(N/(df_t + 1)).
-		"""
-		nEntities = self._mTf_Documents.count()					# Retrieve number of entities and terms in DB.
-		nTerms = self._mIdf_Dictionary.count()
-		startTime = time.time()
-		LOG_N = math.log( nEntities )
-
-		print( "[!] Detected", nEntities, "entities in ned.tf_documents collection" )
-		print( "[!] Computing IDF from document frequencies for", nTerms, "in ned.idf_dictionary collection" )
-		requests = []											# We'll use bulk writes to speed up process.
-		BATCH_SIZE = 10000
-		totalRequests = 0
-		for t in self._mIdf_Dictionary.find():
-			requests.append( pymongo.UpdateOne( {"_id": t["_id"]}, {"$set": {"idf": LOG_N - math.log( t["idf"] + 1.0 )}} ) )
-			totalRequests += 1
-			if len( requests ) == BATCH_SIZE:					# Send lots of update requests.
-				self._mIdf_Dictionary.bulk_write( requests )
-				print( "[*]", totalRequests, "processed" )
-				requests = []
-
-		if requests:
-			self._mIdf_Dictionary.bulk_write( requests )		# Process remaining requests.
-			print( "[*]", totalRequests, "processed" )
-
-		endTime = time.time()
-		print( "[!] Done after", endTime - startTime, "secs." )
-
-
-	def computeAndNormalizeTermWeights( self ):
-		"""
-		Compute weights for each entity document's terms by using the formula: [0.5 + 0.5*f(t,d)/MaxFreq(d)]*[log(N/(df_t + 1))].
-		Each factor is already stored in tf_documents and idf_dictionary; so we need to combine them and then normalize the weight.
-		"""
-		startTime = time.time()
-		print( "[!] Computing and normalizing term frequency weights in entity documents... " )
-		requests = []											# We'll use bulk writes to speed up process.
-		BATCH_SIZE = 200
-		totalRequests = 0
-		for e in self._mTf_Documents.find():					# For each entity document....
-			idfDict = {}
-			for termIdf in self._mIdf_Dictionary.find( {"_id": {"$in": e["t"]}} ):
-				idfDict[termIdf["_id"]] = termIdf["idf"]		# Get the IDF of its terms...
-			weights = []
-			sumW2 = 0.0
-			for i in range( len( e["t"] ) ):					# Multiply each TF by IDF...
-				w = e["w"][i] * idfDict[e["t"][i]]
-				sumW2 += w * w
-				weights.append( w )
-			normFactor = math.sqrt( sumW2 )
-			for i in range( len( e["t"] ) ):					# And normalize weight by document length.
-				weights[i] = weights[i] / normFactor
-
-			requests.append( pymongo.UpdateOne( {"_id": e["_id"]}, {"$set": {"w": weights}} ) )
-			totalRequests += 1
-			if len( requests ) == BATCH_SIZE:					# Send lots of update requests.
-				self._mTf_Documents.bulk_write( requests )
-				print( "[*]", totalRequests, "processed" )
-				requests = []
-
-		if requests:											# Process remaining requests.
-			self._mTf_Documents.bulk_write( requests )
-			print( "[*]", totalRequests, "processed" )
-
-		endTime = time.time()
-		print( "[!] Done after", endTime - startTime, "secs." )
-
-
 	def _updateSIFCollectionsAndEntityIDs( self, documents ):
 		"""
 		Write data to sif_documents, update word_embeddings, and insert entity information to entity_id collections.
@@ -204,14 +137,15 @@ class SIFParser( P.Parser ):
 		checkedDocuments = []
 		requests = []
 		totalRequests = 0
-		BATCH_SIZE = 10000										# We'll do bulk update to word_embeddings.
+		BATCH_SIZE = 50000										# We'll do bulk update to word_embeddings.
 		for doc in documents:
 			if not doc: continue								# Skip empty documents.
 
 			words = []											# Put tokens that DO exist in word_embeddings in this list with
 			freqs = []											# matching indexes in freqs.
-			for t in self._mWord_Embeddings.find( { "_id": { "$in": list( doc["tokens"] ) } }, projection={ "_id": True } ):
-				w = t["_id"]
+			for w in doc["tokens"]:
+				if self._wordMap.get( w ) is None: continue		# Skip words that are not in the vocabulary.
+
 				f = doc["tokens"][w]
 				words.append( w )
 				freqs.append( f )
