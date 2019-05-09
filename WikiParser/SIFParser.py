@@ -3,6 +3,8 @@ import bz2
 import os
 import time
 import math
+import sys
+from typing import Dict
 from multiprocessing import Pool
 import pymongo
 from . import Parser as P
@@ -11,9 +13,9 @@ importlib.reload( Tokenizer )
 importlib.reload( P )
 
 
-class TFIDFParser( P.Parser ):
+class SIFParser( P.Parser ):
 	"""
-	Parsing Wikipedia extracted archives to construct the TFIDF and the entity-id collections.
+	Parsing Wikipedia extracted archives to construct the SIF and the entity-id collections.
 	"""
 
 
@@ -24,13 +26,64 @@ class TFIDFParser( P.Parser ):
 		P.Parser.__init__( self )
 
 		# Defining connections to collections for TFIDF.
-		self._mIdf_Dictionary = self._mNED["idf_dictionary"]						# {_id:str, idf:float}.
-		self._mTf_Documents = self._mNED["tf_documents"]							# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn]}.
+		self._mWord_Embeddings = self._mNED["word_embeddings"]		# {_id:str, e:[float1, float2,...], f:int}.
+		self._mSif_Documents = self._mNED["sif_documents"]			# {_id:int, w:[word1, word2,...], f:[int1, int2,...]}.
+
+		self._wordMap: Dict[str, bool] = {}							# Cache for words from word_embeddings collection.
+		self._loadWordMap()
 
 
-	def buildTFIDFDictionary( self, extractedDir ):
+	def _loadWordMap( self ):
 		"""
-		Build the TF-IDF dictionary by tokenizing content-based Wikipedia pages.
+		Populate the cache word map.
+		"""
+		startTime = time.time()
+		print( "[!] Loading unique terms from word_embeddings collection... ", end="" )
+		for t in self._mWord_Embeddings.find( {}, projection={ "_id": True } ):
+			self._wordMap[t["_id"]] = True
+		endTime = time.time()
+		print( "Done after", endTime - startTime, "secs" )
+
+
+	def buildWordEmbeddings( self, filePath: str ):
+		"""
+		Collect the word embeddings from FastText pre-training file.
+		:param filePath: Word embeddings file.
+		"""
+		print( "------- Building word embeddings collection -------" )
+
+		with open( filePath, "r", encoding="utf-8", newline="\n", errors="ignore" ) as fIn:
+			n, d = fIn.readline().split()
+			print( "[*] Starting to load", n, "word embeddings of dimension", d )
+			startTime = time.time()
+			totalRequests = 0
+			MAX_REQUESTS = 20000							# We'll do bulk insertions.
+			requests = []
+
+			for line in fIn:
+				tokens = line.rstrip().split( " " )
+				word = tokens[0]
+				embedding = [float( e ) for e in tokens[1:]]
+				if word != word.lower():
+					print( "[W] Word", word, "is not lowercased!", file=sys.stderr )
+				requests.append( { "_id": word, "e": embedding, "f": 0.0 } )
+				totalRequests += 1
+				if len( requests ) == MAX_REQUESTS:			# Batch ready?
+					self._mWord_Embeddings.insert_many( requests )
+					print( "[*]", totalRequests, "processed" )
+					requests = []
+
+			if requests:
+				self._mWord_Embeddings.insert_many( requests )
+				print( "[*]", totalRequests, "processed" )
+
+			endTime = time.time()
+			print( "[*] Finished loading", totalRequests, "word embeddings in", endTime - startTime, "seconds" )
+
+
+	def buildSIFDocuments( self, extractedDir ):
+		"""
+		Build the sif_documents collection by tokenizing content-based Wikipedia pages.
 		Skip processing disambiguation pages, lists, and Wikipedia templates, files, etc.
 		Use this method for incremental tokenization of extracted Wikipedia BZ2 files.
 		Afterwards, use computeIDFFromDocumentFrequencies() and computeAndNormalizeTermWeights() to finalize TFIDF structs.
@@ -62,7 +115,7 @@ class TFIDFParser( P.Parser ):
 						pool.join()												# Close pool and wait for work to finish.
 
 						# Update DB collections.
-						nEntities += self._updateTFIDFCollections( documents )
+						nEntities += self._updateSIFCollectionsAndEntityIDs( documents )
 
 						endTime = time.time()
 						print( "[**] Done with", file, ":", endTime - startTime )
@@ -140,48 +193,56 @@ class TFIDFParser( P.Parser ):
 		print( "[!] Done after", endTime - startTime, "secs." )
 
 
-	def _updateTFIDFCollections( self, documents ):
+	def _updateSIFCollectionsAndEntityIDs( self, documents ):
 		"""
-		Write collections related to TF-IDF computations.
+		Write data to sif_documents, update word_embeddings, and insert entity information to entity_id collections.
 		:param documents: A list of dictionaries of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
 		:return: Number of non-empty entity documents processed.
 		"""
+
+		# We only update terms from a document iff these terms exist in the word_embeddings collection.
+		checkedDocuments = []
+		requests = []
+		totalRequests = 0
+		BATCH_SIZE = 10000										# We'll do bulk update to word_embeddings.
+		for doc in documents:
+			if not doc: continue								# Skip empty documents.
+
+			words = []											# Put tokens that DO exist in word_embeddings in this list with
+			freqs = []											# matching indexes in freqs.
+			for t in self._mWord_Embeddings.find( { "_id": { "$in": list( doc["tokens"] ) } }, projection={ "_id": True } ):
+				w = t["_id"]
+				f = doc["tokens"][w]
+				words.append( w )
+				freqs.append( f )
+
+				# Try to update word_embeddings by increasing tokens frequencies.
+				requests.append( pymongo.UpdateOne( { "_id": w }, { "$inc": { "f": f } } ) )
+				totalRequests += 1
+				if len( requests ) >= BATCH_SIZE:
+					self._mWord_Embeddings.bulk_write( requests )
+					print( "[*]", totalRequests, "processed" )
+					requests = []
+
+			if not words: continue								# Check the document still have valid tokens.
+
+			# New valid document.
+			checkedDocuments.append( { "_id": doc["id"], "e": doc["title"], "w": words, "f": freqs } )
+
+		# Send remaining word_embeddings update requests.
+		if requests:
+			self._mWord_Embeddings.bulk_write( requests )
+			print( "[*]", totalRequests, "processed" )
+
+		# Bulk insertion of term frequencies for each checked entity document.
+		sd = [ { "_id": doc["_id"], "w": doc["w"], "f": doc["f"] } for doc in checkedDocuments ]
+		self._mSif_Documents.insert_many( sd )
+
 		# Insert Wikipedia titles and documents IDs in entity_id collection.
 		# This serves the purpose of knowing which entities DO exist in the KB.
-		bulkEntities = [{ "_id": doc["id"], "e": doc["title"], "e_l": doc["title"].lower() } for doc in documents if doc]		# Skip any empty document.
-		self._mEntity_ID.insert_many( bulkEntities )
-
-		# Upsert terms and document frequencies in idf_dictionary collection.
-		for doc in documents:
-			if not doc: continue								# Skip empty documents.
-
-			s = set( doc["tokens"] )  							# Set of terms to upsert.
-			toUpdate = set()  									# Set of term documents IDs to update.
-			for t in self._mIdf_Dictionary.find( { "_id": { "$in": list( s ) } } ):
-				toUpdate.add( t["_id"] )
-				s.remove( t["_id"] )
-
-			if s:  												# Insert new term documents if there are terms left in set.
-				toInsert = [{ "_id": w, "idf": 1 } for w in s]  # List of new term documents to bulk-insert in collection.
-				self._mIdf_Dictionary.insert_many( toInsert )
-
-			if toUpdate:
-				self._mIdf_Dictionary.update_many( { "_id": { "$in": list( toUpdate ) } },
-												   { "$inc": { "idf": +1.0 } } )  	# Basically increase by one the term document frequency.
-
-		# Bulk insertion of term frequencies for each parsed document.
-		ds = []
-		for doc in documents:
-			if not doc: continue								# Skip empty documents.
-
-			terms = []
-			weights = []
-			for t in doc["tokens"]:
-				terms.append( t )								# One array with terms, and another with weights (for now, frequencies).
-				weights.append( doc["tokens"][t] )
-			ds.append( {"_id": doc["id"], "t": terms, "w": weights} )
-
-		self._mTf_Documents.insert_many( ds )
+		# TODO: Remove comments once changes are done.
+		bulkEntities = [ { "_id": doc["_id"], "e": doc["e"], "e_l": doc["e"].lower() } for doc in checkedDocuments ]
+		# self._mEntity_ID.insert_many( bulkEntities )
 		return len( bulkEntities )
 
 
@@ -189,13 +250,13 @@ class TFIDFParser( P.Parser ):
 		"""
 		Reset the TFIDF DB collections to start afresh.
 		"""
-		self._mIdf_Dictionary.drop()
-		self._mTf_Documents.drop()
-		self._mEntity_ID.drop()
+		# self._mWord_Embeddings.drop()		# TODO: Remove comments after refactoring.
+		self._mSif_Documents.drop()
+		# self._mEntity_ID.drop()
 
 		# Create indices on (re)created collections.
-		self._mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
-		self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )		# Can't be unique: example - ALGOL and Algol both exist as entity names.
+		# self._mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
+		# self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )		# Can't be unique: example - ALGOL and Algol both exist as entity names.
 
 		print( "[!] Collections have been dropped")
 

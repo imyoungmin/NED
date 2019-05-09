@@ -1,7 +1,5 @@
 import importlib
 import re
-import PorterStemmer as PS
-from nltk.corpus import stopwords
 from pymongo import MongoClient
 import html
 from abc import ABCMeta, abstractmethod
@@ -28,8 +26,6 @@ class Parser( metaclass=ABCMeta ):
 		'bitcoin', 'ftp', 'ftps', 'geo', 'git', 'gopher', 'http', 'https', 'irc', 'ircs', 'magnet', 'mailto', 'mms',
 		'news', 'nntp', 'redis', 'sftp', 'sip', 'sips', 'sms', 'ssh', 'svn', 'tel', 'telnet', 'urn', 'worldwind', 'xmpp'
 	]
-	_stopWords = set( stopwords.words( "english" ) )		# Stop words set: use nltk.download('stopwords').  Then add: "n't" and "'s".
-	_porterStemmer = PS.PorterStemmer()						# Porter stemmer.
 
 	# Regular expressions.
 	_UrlPattern = re.compile( r"(?:" + r"|".join( _UrlProtocols ) + r")(?:%3a|:)/.*?", re.I )  				# URL pattern not inside a link.
@@ -94,7 +90,6 @@ class Parser( metaclass=ABCMeta ):
 					if firstLine:
 						firstLine = False
 					else:
-	#					_ExternalLinkPattern.sub( r"\3", line )				# Replace external links for their anchor texts.  (No interwiki links affected).
 						doc["lines"].append( line.lower() if lowerCase else line )		# Add (lowercased?) line of text to output document.
 
 		return documents
@@ -123,27 +118,24 @@ class Parser( metaclass=ABCMeta ):
 	def curateTokens( tkns: List[str] ) -> List[str]:
 		"""
 		Verify tokens comply with some constraints.
+		We are leaving stop words, punctuation-pattern words, and we are not stemming tokens.
 		:param tkns: List of tokens.
 		:return: Curated list of tokens.
 		"""
-		tokens = [w for w in tkns if not w in Parser._stopWords]  					# Remove stop words.
-
 		result: List[str] = []
-		for token in tokens:
+		for token in tkns:
 			if len( token ) <= 128:  												# Skip too long tokens.
 				if Parser._UrlPattern.search( token ) is None:  					# Skip URLs.
-					if Parser._PunctuationOnlyPattern.match( token ) is None:  		# Skip patterns like '...' and '#' and '--'
-						result.append( Parser._porterStemmer.stem( token, 0, len( token ) - 1 ) )  # Stem token.
+					result.append( token )
 
 		return result
 
 
 	@staticmethod
-	def tokenizeDoc( doc, normalizeTF=True ):
+	def tokenizeDoc( doc ):
 		"""
 		Tokenize a document object.
 		:param doc: Document dictionary to process: {id:int, title:str, lines:[str]}.
-		:param normalizeTF: Whether normalize raw term frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
 		:return: A dictionary of the form {id:int, title:str, tokens:{token1:freq1, ..., tokenn:freqn}}.
 		"""
 		nDoc = { "id": doc["id"], "title": doc["title"], "tokens": { } }
@@ -167,10 +159,5 @@ class Parser( metaclass=ABCMeta ):
 			print( "[W] Empty document:", nDoc, file=sys.stderr )
 			return { }
 
-		# Normalize raw frequency with formula: TF(t,d) = 0.5 + 0.5*f(t,d)/MaxFreq(d).
-		if normalizeTF:
-			for token in nDoc["tokens"]:
-				nDoc["tokens"][token] = 0.5 + 0.5 * nDoc["tokens"][token] / maxFreq
-
-		#	print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
+		# print( "[***]", nDoc["id"], nDoc["title"], "... Done!" )
 		return nDoc
