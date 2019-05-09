@@ -174,9 +174,8 @@ class SIFParser( P.Parser ):
 
 		# Insert Wikipedia titles and documents IDs in entity_id collection.
 		# This serves the purpose of knowing which entities DO exist in the KB.
-		# TODO: Remove comments once changes are done.
 		bulkEntities = [ { "_id": doc["_id"], "e": doc["e"], "e_l": doc["e"].lower() } for doc in checkedDocuments ]
-		# self._mEntity_ID.insert_many( bulkEntities )
+		self._mEntity_ID.insert_many( bulkEntities )
 		return len( bulkEntities )
 
 
@@ -184,13 +183,13 @@ class SIFParser( P.Parser ):
 		"""
 		Reset the TFIDF DB collections to start afresh.
 		"""
-		# self._mWord_Embeddings.drop()		# TODO: Remove comments after refactoring.
+		self._mWord_Embeddings.drop()
 		self._mSif_Documents.drop()
-		# self._mEntity_ID.drop()
+		self._mEntity_ID.drop()
 
 		# Create indices on (re)created collections.
-		# self._mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
-		# self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )		# Can't be unique: example - ALGOL and Algol both exist as entity names.
+		self._mEntity_ID.create_index( [("e", pymongo.ASCENDING)], unique=True )
+		self._mEntity_ID.create_index( [("e_l", pymongo.ASCENDING)] )		# Can't be unique: example - ALGOL and Algol both exist as entity names.
 
 		print( "[!] Collections have been dropped")
 
@@ -221,3 +220,19 @@ class SIFParser( P.Parser ):
 			print( "[*]", totalRequests, "processed" )
 		endTime = time.time()
 		print( "[!] Done after", endTime - startTime, "secs." )
+
+
+	def saveTotalWordCount( self ):
+		"""
+		Sum all of the word frequencies and save it to a file: Datasets/wordcount.txt
+		"""
+		print( "------- Computing total word count -------" )
+
+		startTime = time.time()
+		pipe = [ { '$group': { '_id': None, 'total': { '$sum': '$f' } } } ]
+		result = self._mWord_Embeddings.aggregate( pipeline=pipe )
+		r = result.next()
+		total = str( int( r["total"] ) )
+		with open( "Datasets/wordcount.txt", "w", encoding="utf-8" ) as fOut:
+			fOut.write( total )
+		print( "Total word frequencies is ", total, "-- Done after", time.time() - startTime, "secs" )

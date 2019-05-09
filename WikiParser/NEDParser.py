@@ -10,9 +10,7 @@ from urllib.parse import unquote
 import html
 import sys
 from . import Parser as P
-import Tokenizer
 importlib.reload( P )
-importlib.reload( Tokenizer )
 
 
 class NEDParser( P.Parser ):
