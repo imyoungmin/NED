@@ -1,4 +1,4 @@
-from pymongo import MongoClient
+import pymongo
 from typing import Set, Dict, Tuple, List
 import sys
 import numpy as np
@@ -12,24 +12,24 @@ class Entity:
 	"""
 	Implementation of an entity.  We want to have at most 1 object per entity across surface forms' candidates.
 	"""
-
-	def __init__( self, eId: int, name: str, pointedToBy: Set[int] ):
+	def __init__( self, eId: int, name: str, pointedToBy: Set[int], initialEmbedding: np.ndarray ):
 		"""
 		Constructor.
 		:param eId: Entity ID.
 		:param name: Entity name as it appears in its Wikipedia article.
 		:param pointedToBy: Set of Wikipedia articles (i.e. entity IDs) pointing to this entity.
+		:param initialEmbedding: Initial (unnormalized) document embedding vector calculated from entry in sif_documents.
 		"""
 		self.id = eId
 		self.name = name
 		self.pointedToBy = pointedToBy
+		self.v = np.array( initialEmbedding )
 
 
 class Candidate:
 	"""
 	Candidate mapping implementation.
 	"""
-
 	def __init__( self, eId: int, count: int ):
 		"""
 		Constructor.
@@ -43,20 +43,33 @@ class Candidate:
 		self.topicalCoherence = 0.0		# To be updated during the iterative substitution algorithm.
 
 
-class NamedEntity:
+class SurfaceForm:
 	"""
 	Named entity object.
 	"""
-
-	def __init__( self, context: Set[str], candidates: Dict[int, Candidate] ):
+	def __init__( self, candidates: Dict[int, Candidate], initialEmbedding: np.ndarray ):
 		"""
 		Constructor.
-		:param context: Context bag of words around entity mention.
 		:param candidates: Map of candidate mapping entities.
+		:param initialEmbedding: Initial (unnormalized) document embedding vector calculated from context words.
 		"""
-		self.context = { w: True for w in context }		# Make it into a dict => {"term1": True, "term2": True, ...}
+		self.v = np.array( initialEmbedding )
 		self.candidates = candidates
 		self.mappingEntityId = 0						# Final entity mapping.
+
+
+class Word:
+	"""
+	Struct for words.
+	"""
+	def __init__( self, embedding: List[float], p: float ):
+		"""
+		Constructor
+		:param embedding: Word embedding as 300-D vector.
+		:param p: Word probability across all of corpus vocabulary = word frequency divided by total word freq count.
+		"""
+		self.v = np.array( embedding )
+		self.p = p
 
 
 class NED:
@@ -69,28 +82,37 @@ class NED:
 		Constructor.
 		"""
 		# MongoDB connections.
-		self._mClient = MongoClient( "mongodb://localhost:27017/" )
-		self._mNED = self._mClient.ned
-		self._mEntity_ID = self._mNED["entity_id"]  			# {_id:int, e:str, e_l:str}.
+		self._mClient: pymongo.mongo_client = pymongo.MongoClient( "mongodb://localhost:27017/" )
+		self._mNED = self._mClient["ned"]
+		self._mEntity_ID: pymongo.collection = self._mNED["entity_id"]  			# {_id:int, e:str, e_l:str}.
 
-		# Connections to TFIDF collections.
-		self._mIdf_Dictionary = self._mNED["idf_dictionary"]  	# {_id:str, idf:float}.
-		self._mTf_Documents = self._mNED["tf_documents"]  		# {_id:int, t:[t1, ..., tn], w:[w1, ..., wn]}. -- t stands for "term", w for "weight".
+		# Connections to SIF collections.
+		self._mWord_Embeddings: pymongo.collection = self._mNED["word_embeddings"] 	# {_id:str, e:List[float], f:int}
+		self._mSif_Documents: pymongo.collection = self._mNED["sif_documents"]		# {_id:int, w:List[str], f:List[int]}
 
 		# Defining connections to collections for entity disambiguation.
-		self._mNed_Dictionary = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
-		self._mNed_Linking = self._mNED["ned_linking"]  		# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
+		self._mNed_Dictionary: pymongo.collection = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
+		self._mNed_Linking: pymongo.collection = self._mNED["ned_linking"]  		# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
 
 		# Retrieve total number of entities recorded in DB.
 		self._WP = self._mEntity_ID.count()
-		self._LOG_WP = np.log( self._WP )						# Log used in topic relatedness metric.
+		self._LOG_WP = np.log( self._WP )											# Log used in topic relatedness metric.
 		print( "NED initialized with", self._WP, "entities" )
+
+		# Read total word frequencies and initialize map of word objects.
+		with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
+			self._TOTAL_WORD_FREQ_COUNT = float( fIn.read() )
+		print( "NED initialized with", self._TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
+		self._wordMap: Dict[str, Word] = {}
+
+		self._a = 1e-3																# Parameter 'a' for SIF.
 
 		# Initialize map of entities (as a cache).
 		self._entityMap: Dict[int, Entity] = {}
 
 		# Named entities map {"namedEntity1": NamedEntity1, "namedEntity2": NamedEntity2, ...}.
-		self._namedEntities: Dict[str, NamedEntity] = {}
+		self._surfaceForms: Dict[str, SurfaceForm] = {}
+		self._WINDOW_SIZE = 10
 
 		# Initial score constants.
 		self._alpha = 0.25
@@ -139,28 +161,53 @@ class NED:
 		if i < len( text ):
 			tokens += P.Parser.tokenizeText( text[i:] )
 
-		# TODO: Register candidates and windows of tokens around surface forms.
+		# For each surface form compute an initial, unnormalized 'document' embedding.
+		# Also collect the candidate mapping entities.
+		# If a surface form doesn't have any candidates, skip it.
+		for sf in surfaceForms:
+			words: Set[str] = set()
+			for occurrence in surfaceForms[sf]:
+				start = max( 0, occurrence[0] - self._WINDOW_SIZE )				# Collect tokens around occurrence.
+				end = min( occurrence[1] + self._WINDOW_SIZE, len( tokens ) )
+				for i in range( start, end ):
+					words.add( tokens[i] )
+
+			# Context has at least the surface form's tokens themselves; now, get the unnormalized initial 'document' embedding.
+			# It'll also check for surface form tokens to exist in word_embeddings collection.
+			v = self._getRawDocumentEmbedding( words )
+			if np.count_nonzero( v ):
+				candidates = self._getCandidatesForNamedEntity( sf )
+				if candidates:
+					self._surfaceForms[sf] = SurfaceForm( candidates, v )
+				else:
+					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be skipped...", sys.stderr )
+			else:
+				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be skipped...", sys.stderr )
+
+
 		return {}
 
 
-	def getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
+	def _getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
 		"""
 		Retrieve candidate mapping entities for given named entity.
 		Calculate the prior probability at the same time.
-		:param m_i: Entity mention (a.k.a surface form).
+		:param m_i: Entity mention (a.k.a surface form) in lowercase.
 		:return: A dict {e_1_id:Candidate_1, e_2_id:Candidate_2,...}.
 		"""
 		result = {}
-		record1 = self._mNed_Dictionary.find_one( { "_id": m_i.lower() }, projection={ "m": True } )
+		record1 = self._mNed_Dictionary.find_one( { "_id": m_i }, projection={ "m": True } )
 		if record1:
 			total = 0											# Accumulate reference count for this surface form by the candidate mappings.
 			for r_j in record1["m"]:
 				r = int( r_j )
 
-				# Check the cache for candidate entity.
+				# Check the cache for entity.
 				if self._entityMap.get( r ) is None:
-					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity in cache.
-					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ) )			# And retrieve other pages linking to new entity.
+					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity into cache.
+					record3 = self._mSif_Documents.find_one( { "_id": r }, projection={ "w": True } )	# Extract words in entity document.
+					vd = self._getRawDocumentEmbedding( set( record3["w"] ) )							# Get an initial unnormalized document embedding.
+					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ), vd )		# And retrieve other pages linking to new entity.
 
 				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
 				total += record1["m"][r_j]
@@ -171,6 +218,29 @@ class NED:
 
 		print( "[*] Collected", len( result ), "candidate entities for [", m_i, "]" )
 		return result			# Empty if no candidates were found for given entity mention.
+
+
+	def _getRawDocumentEmbedding( self, d: Set[str] ) -> np.ndarray:
+		"""
+		Compute an unnormalized document embedding from input words.
+		Retrieve and cache word embeddings at the same time.
+		:param d: Bag of words (e.g. document) -- must be lowercased!
+		:return: \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
+		"""
+		vd = np.zeros( 300 )
+		for w in d:
+			if self._wordMap.get( w ) is None:			# Not in cache?
+				r = self._mWord_Embeddings.find_one( { "_id": w } )
+				if r is None:
+					continue								# Skip words not in the vocabulary.
+
+				vw = r["e"]									# Word embedding and probability.
+				p = r["f"] / self._TOTAL_WORD_FREQ_COUNT
+				self._wordMap[w] = Word( vw, p )			# Cache word object.
+
+			vd += self._a / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
+
+		return vd			# Still need to normalize by total number of documents and subtracting proj onto first singular vector.
 
 
 	def _getPagesLikingTo( self, e: int ) -> Set[int]:
@@ -202,24 +272,8 @@ class NED:
 			return 0.0
 
 
-	def contextSimilarity( self, bow: Dict[str, bool], eId: int ) -> float:
-		"""
-		Calculate the context similarity between the terms in a window around the entity mention and a true entity.
-		:param bow: Bag of words of context around entity mention: {"w1": True, "w2": True, ...}
-		:param eId: Entity ID.
-		:return: Cosine similarity between BOW and entity document.
-		"""
-		# Get the term weights for input entity ID.
-		record = self._mTf_Documents.find_one( { "_id", eId } )
-		if record is None:
-			print( "[x] Context similarity falta error: Entity", eId, "doesn't exist in the tf_documents collection!", file=sys.stderr )
-			return 0.0
-
-		# Use modified TF-IDF by taking the query BOW as boolean indicators, and just accumulate TF weights in entity document.
+	def contextSimilarity( self, sf: str, eId: int ) -> float:
 		similarity = 0.0
-		for i, term in record["t"]:
-			if bow.get( term ) is not None:
-				similarity += record["w"][i]
 
 		return similarity
 
@@ -247,7 +301,7 @@ class NED:
 		"""
 		totalScore = 0
 		for sf in M:
-			e = self._namedEntities[sf].candidates[M[sf]]
+			e = self._surfaceForms[sf].candidates[M[sf]]
 			totalScore += self._alpha * e.priorProbability \
 						  + self._beta * e.contextSimilarity \
 						  + self._gamma * self.topicalCoherence( sf, M )
@@ -259,14 +313,14 @@ class NED:
 		Solve for the best entity mappings for all named entities in order to have an initial score.
 		"""
 		# Pick the candidate with maximum prior probability as first approximation to mapping entity.
-		for ne in self._namedEntities:
+		for ne in self._surfaceForms:
 			mostPopularProb = 0
-			for cm in self._namedEntities[ne].candidates:
-				if self._namedEntities[ne].candidates[cm].priorProbability > mostPopularProb:
-					self._namedEntities[ne].mappingEntityId = cm
+			for cm in self._surfaceForms[ne].candidates:
+				if self._surfaceForms[ne].candidates[cm].priorProbability > mostPopularProb:
+					self._surfaceForms[ne].mappingEntityId = cm
 
 		iteration = 1
-		M: Dict[str: int] = { ne: self._namedEntities[ne].mappingEntityId for ne in self._namedEntities }	# Surface forms and respective mapping entities.
+		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }	# Surface forms and respective mapping entities.
 		bestTIS = self.totalInitialScore( M )
 
 		print( "[ISA][", iteration,"] Initial score starts at", bestTIS )
@@ -276,10 +330,10 @@ class NED:
 			foundBetterScore = False
 			bestNE = 0		# Best surface form and candidate mapping.
 			bestCM = 0
-			for ne in self._namedEntities:
-				M = { ne: self._namedEntities[ne].mappingEntityId for ne in self._namedEntities }  # Try-out mapping entities.
-				for cm in self._namedEntities[ne].candidates:
-					if cm != self._namedEntities[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
+			for ne in self._surfaceForms:
+				M = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }  # Try-out mapping entities.
+				for cm in self._surfaceForms[ne].candidates:
+					if cm != self._surfaceForms[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
 						M[ne] = cm											# Check this candidate substitution.
 
 						tis = self.totalInitialScore( M )
@@ -290,7 +344,7 @@ class NED:
 							bestTIS = tis
 
 			if foundBetterScore > 0:										# Did score ever increase?
-				self._namedEntities[bestNE].mappingEntityId = bestCM		# New best mapping.
+				self._surfaceForms[bestNE].mappingEntityId = bestCM			# New best mapping.
 				print( "[ISA][", iteration ,"] Score increased to", bestTIS )
 				iteration += 1
 			else:
