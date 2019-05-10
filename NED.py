@@ -2,6 +2,7 @@ import pymongo
 from typing import Set, Dict, Tuple, List
 import sys
 import numpy as np
+from sklearn.decomposition import TruncatedSVD
 from WikiParser import Parser as P
 import importlib
 
@@ -166,14 +167,14 @@ class NED:
 		for sf in surfaceForms:
 			words: Set[str] = set()
 			for occurrence in surfaceForms[sf]:
-				start = max( 0, occurrence[0] - self._WINDOW_SIZE )				# Collect tokens around occurrence.
+				start = max( 0, occurrence[0] - self._WINDOW_SIZE )							# Collect tokens around occurrence.
 				end = min( occurrence[1] + self._WINDOW_SIZE, len( tokens ) )
 				for i in range( start, end ):
 					words.add( tokens[i] )
 
 			# Context has at least the surface form's tokens themselves; now, get the initial 'document' embedding.
 			# It'll also check for surface form tokens to exist in word_embeddings collection.
-			v = self._getRawDocumentEmbedding( words )
+			v = self._getRawDocumentEmbedding( list( words ), [1 for _ in range( len( words ) )] )	# Send tokens with frequency 1.
 			if np.count_nonzero( v ):
 				candidates = self._getCandidatesForNamedEntity( sf )
 				if candidates:
@@ -182,6 +183,23 @@ class NED:
 					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be skipped...", sys.stderr )
 			else:
 				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be skipped...", sys.stderr )
+
+		# Remove projection onto first singular vector (i.e. common discourse vector).
+		if self._surfaceForms:
+			eL = [e.v for eId, e in self._entityMap.items()]		# List of embeddings for entities.
+			sfL = [s.v for sf, s in self._surfaceForms.items()]		# List of surface forms' context embeddings.
+			X = np.array( eL + sfL )								# Matrix whose columns are the embeddings of all docs.
+			svd = TruncatedSVD( n_components=1, random_state=0, n_iter=7 )
+			svd.fit( X )
+			v1 = svd.components_[0,:]								# First component in V (not in U).
+
+			for eId in self._entityMap:								# Remove common discourse in entities and surface forms embeddings.
+				self._entityMap[eId].v -= v1 * v1.dot( self._entityMap[eId].v )
+			for sf in self._surfaceForms:
+				self._surfaceForms[sf].v -= v1 * v1.dot( self._surfaceForms[sf].v )
+
+		else:
+			print( "[X] Nothing to compute!", sys.stderr )
 
 
 		return {}
@@ -204,8 +222,8 @@ class NED:
 				# Check the cache for entity.
 				if self._entityMap.get( r ) is None:
 					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity into cache.
-					record3 = self._mSif_Documents.find_one( { "_id": r }, projection={ "w": True } )	# Extract words in entity document.
-					vd = self._getRawDocumentEmbedding( set( record3["w"] ) )							# Get an initial document embedding (without common component removed).
+					record3 = self._mSif_Documents.find_one( { "_id": r } )								# Extract words and frequencies in entity document.
+					vd = self._getRawDocumentEmbedding( record3["w"], record3["f"] )					# Get an initial document embedding (without common component removed).
 					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ), vd )		# And retrieve other pages linking to new entity.
 
 				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
@@ -219,17 +237,19 @@ class NED:
 		return result			# Empty if no candidates were found for given entity mention.
 
 
-	def _getRawDocumentEmbedding( self, d: Set[str] ) -> np.ndarray:
+	def _getRawDocumentEmbedding( self, words: List[str], freqs: List[int] ) -> np.ndarray:
 		"""
-		Compute an initial document embedding from input words.
+		Compute an initial document embedding from input words and respective frequencies.
 		Retrieve and cache word embeddings at the same time.
-		Do not "normalize" yet the document embedding.
-		:param d: Bag of words (e.g. document) -- must be lowercased!
-		:return: \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
+		:param words: List of document words -- must be lowercased!
+		:param freqs: List of frequencies corresponding to document words.
+		:return: \frac{1}{|d|} \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
 		"""
 		vd = np.zeros( 300 )
-		b = self._a / len( d )							# Normalizing term.
-		for w in d:
+
+		totalFreq = 0.0									# Count freqs of effective words in document for normalization.
+		for i, w in enumerate( words ):
+			f = freqs[i]
 			if self._wordMap.get( w ) is None:			# Not in cache?
 				r = self._mWord_Embeddings.find_one( { "_id": w } )
 				if r is None:
@@ -239,9 +259,10 @@ class NED:
 				p = r["f"] / self._TOTAL_WORD_FREQ_COUNT
 				self._wordMap[w] = Word( vw, p )			# Cache word object.
 
-			vd += b / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
+			vd += f * self._a / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
+			totalFreq += f
 
-		return vd			# Still need to subtract proj onto first singular vector.
+		return vd / totalFreq		# Still need to subtract proj onto first singular vector (i.e. common discourse vector).
 
 
 	def _getPagesLikingTo( self, e: int ) -> Set[int]:
