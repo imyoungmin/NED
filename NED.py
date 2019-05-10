@@ -18,7 +18,7 @@ class Entity:
 		:param eId: Entity ID.
 		:param name: Entity name as it appears in its Wikipedia article.
 		:param pointedToBy: Set of Wikipedia articles (i.e. entity IDs) pointing to this entity.
-		:param initialEmbedding: Initial (unnormalized) document embedding vector calculated from entry in sif_documents.
+		:param initialEmbedding: Initial (without common component removed) document embedding vector calculated from entry in sif_documents.
 		"""
 		self.id = eId
 		self.name = name
@@ -40,7 +40,6 @@ class Candidate:
 		self.count = count
 		self.priorProbability = 0.0		# To be updated when collecting candidates for a surface form.
 		self.contextSimilarity = 0.0	# TODO: To be updated with the homonym function.
-		self.topicalCoherence = 0.0		# To be updated during the iterative substitution algorithm.
 
 
 class SurfaceForm:
@@ -51,7 +50,7 @@ class SurfaceForm:
 		"""
 		Constructor.
 		:param candidates: Map of candidate mapping entities.
-		:param initialEmbedding: Initial (unnormalized) document embedding vector calculated from context words.
+		:param initialEmbedding: Initial (without common component removed) document embedding vector calculated from context words.
 		"""
 		self.v = np.array( initialEmbedding )
 		self.candidates = candidates
@@ -105,7 +104,7 @@ class NED:
 		print( "NED initialized with", self._TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
 		self._wordMap: Dict[str, Word] = {}
 
-		self._a = 1e-3																# Parameter 'a' for SIF.
+		self._a = 0.001																# Parameter 'a' for SIF.
 
 		# Initialize map of entities (as a cache).
 		self._entityMap: Dict[int, Entity] = {}
@@ -161,7 +160,7 @@ class NED:
 		if i < len( text ):
 			tokens += P.Parser.tokenizeText( text[i:] )
 
-		# For each surface form compute an initial, unnormalized 'document' embedding.
+		# For each surface form compute an initial 'document' embedding (without common component removed).
 		# Also collect the candidate mapping entities.
 		# If a surface form doesn't have any candidates, skip it.
 		for sf in surfaceForms:
@@ -172,7 +171,7 @@ class NED:
 				for i in range( start, end ):
 					words.add( tokens[i] )
 
-			# Context has at least the surface form's tokens themselves; now, get the unnormalized initial 'document' embedding.
+			# Context has at least the surface form's tokens themselves; now, get the initial 'document' embedding.
 			# It'll also check for surface form tokens to exist in word_embeddings collection.
 			v = self._getRawDocumentEmbedding( words )
 			if np.count_nonzero( v ):
@@ -206,7 +205,7 @@ class NED:
 				if self._entityMap.get( r ) is None:
 					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity into cache.
 					record3 = self._mSif_Documents.find_one( { "_id": r }, projection={ "w": True } )	# Extract words in entity document.
-					vd = self._getRawDocumentEmbedding( set( record3["w"] ) )							# Get an initial unnormalized document embedding.
+					vd = self._getRawDocumentEmbedding( set( record3["w"] ) )							# Get an initial document embedding (without common component removed).
 					self._entityMap[r] = Entity( r, record2["e"], self._getPagesLikingTo( r ), vd )		# And retrieve other pages linking to new entity.
 
 				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
@@ -222,12 +221,14 @@ class NED:
 
 	def _getRawDocumentEmbedding( self, d: Set[str] ) -> np.ndarray:
 		"""
-		Compute an unnormalized document embedding from input words.
+		Compute an initial document embedding from input words.
 		Retrieve and cache word embeddings at the same time.
+		Do not "normalize" yet the document embedding.
 		:param d: Bag of words (e.g. document) -- must be lowercased!
 		:return: \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
 		"""
 		vd = np.zeros( 300 )
+		b = self._a / len( d )							# Normalizing term.
 		for w in d:
 			if self._wordMap.get( w ) is None:			# Not in cache?
 				r = self._mWord_Embeddings.find_one( { "_id": w } )
@@ -238,9 +239,9 @@ class NED:
 				p = r["f"] / self._TOTAL_WORD_FREQ_COUNT
 				self._wordMap[w] = Word( vw, p )			# Cache word object.
 
-			vd += self._a / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
+			vd += b / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
 
-		return vd			# Still need to normalize by total number of documents and subtracting proj onto first singular vector.
+		return vd			# Still need to subtract proj onto first singular vector.
 
 
 	def _getPagesLikingTo( self, e: int ) -> Set[int]:
