@@ -115,8 +115,8 @@ class NED:
 		self._WINDOW_SIZE = 20
 
 		# Initial score constants.
-		self._alpha = 0.25
-		self._beta = 0.25
+		self._alpha = 0.1
+		self._beta = 0.4
 		self._gamma = 0.5
 
 
@@ -184,6 +184,7 @@ class NED:
 					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be skipped...", sys.stderr )
 			else:
 				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be skipped...", sys.stderr )
+		print( "... Done!" )
 
 		# Remove projection onto first singular vector (i.e. common discourse vector).
 		if self._surfaceForms:
@@ -199,6 +200,8 @@ class NED:
 				self._entityMap[eId].v -= v1 * v1.dot( self._entityMap[eId].v )
 			for sf in self._surfaceForms:
 				self._surfaceForms[sf].v -= v1 * v1.dot( self._surfaceForms[sf].v )
+
+			print( "... Done!" )
 		else:
 			print( "[X] Nothing to compute!  No valid surface forms collected!", sys.stderr )
 			return {}
@@ -207,7 +210,19 @@ class NED:
 		print( "[*] Computing context similarity between named entity mentions and candidate mapping entities" )
 		for sf, sfObj in self._surfaceForms.items():
 			for c, cObj in sfObj.candidates.items():
-				cObj.contextSimilarity = self.contextSimilarity( sf, c )	# Store context similarity for later iter. subs. alg.
+				cObj.contextSimilarity = self._contextSimilarity( sf, c )	# Store context similarity for later iter. subs. alg.
+		print( "... Done!" )
+
+		# Get an initial approximation to a mapping entity using iterative substitution.
+		# After this we can compute an initial score for each candidate mapping of every surface form.
+		if len( self._surfaceForms ) > 1:							# Topical coherence depends on having more than 1 sf.
+			print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
+			self._iterativeSubstitutionAlgorithm()
+			print( "... Done!" )
+		else:
+			print( "[*] There is only one surface form.  Just prior probability and context similarity will be considered" )
+			# TODO: Get best candidate for unique surface form.
+			print( "... Done!" )
 
 		return {}
 
@@ -289,7 +304,7 @@ class NED:
 		return U
 
 
-	def topicalRelatedness( self, u1: int, u2: int ) -> float:
+	def _topicalRelatedness( self, u1: int, u2: int ) -> float:
 		"""
 		Calculate the Wikipedia topical relatedness between two entities.
 		:param u1: First entity ID.
@@ -305,7 +320,7 @@ class NED:
 			return 0.0
 
 
-	def contextSimilarity( self, sf: str, eId: int ) -> float:
+	def _contextSimilarity( self, sf: str, eId: int ) -> float:
 		"""
 		Compute the consine similarity between the document embedding of surface form and a candidate mapping entity.
 		:param sf: Surface form ID (i.e. the "text" itself).
@@ -314,10 +329,11 @@ class NED:
 		"""
 		u = self._surfaceForms[sf].v
 		v = self._entityMap[eId].v
-		return u.dot(v) / ( np.linalg.norm( u ) * np.linalg.norm( v ) )
+		cs = u.dot(v) / ( np.linalg.norm( u ) * np.linalg.norm( v ) )
+		return ( 1.0 + cs ) / 2.0	# Normalize to a value between 0 and 1 since with word2vec we can get negative cos sim.
 
 
-	def topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
+	def _topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
 		"""
 		Compute topical coherence of mapping entity for given surface form with respect to mapping entities of the rest.
 		:param surfaceForm: Central surface form whose (candidate) mapping entity we task as reference.
@@ -327,11 +343,11 @@ class NED:
 		totalTR = 0
 		for sf in M:
 			if sf != surfaceForm:
-				totalTR += self.topicalRelatedness( M[surfaceForm], M[sf] )
+				totalTR += self._topicalRelatedness( M[surfaceForm], M[sf] )
 		return  totalTR / ( len( M ) - 1 )
 
 
-	def totalInitialScore( self, M: Dict[str, int] ) -> float:
+	def _totalInitialScore( self, M: Dict[str, int] ) -> float:
 		"""
 		Calculate the total initial score for a given set of mapping entities.
 		This function is used in the iterative substitution algorithm to evaluate different candidates performance.
@@ -343,24 +359,25 @@ class NED:
 			e = self._surfaceForms[sf].candidates[M[sf]]
 			totalScore += self._alpha * e.priorProbability \
 						  + self._beta * e.contextSimilarity \
-						  + self._gamma * self.topicalCoherence( sf, M )
+						  + self._gamma * self._topicalCoherence( sf, M )
 		return totalScore
 
 
-	def iterativeSubstitutionAlgorithm( self ):
+	def _iterativeSubstitutionAlgorithm( self ):
 		"""
 		Solve for the best entity mappings for all named entities in order to have an initial score.
 		"""
 		# Pick the candidate with maximum prior probability as first approximation to mapping entity.
-		for ne in self._surfaceForms:
+		for sf, sfObj in self._surfaceForms.items():
 			mostPopularProb = 0
-			for cm in self._surfaceForms[ne].candidates:
-				if self._surfaceForms[ne].candidates[cm].priorProbability > mostPopularProb:
-					self._surfaceForms[ne].mappingEntityId = cm
+			for cm, cmObj in sfObj.candidates.items():
+				if cmObj.priorProbability > mostPopularProb:
+					sfObj.mappingEntityId = cm
+					mostPopularProb = cmObj.priorProbability
 
 		iteration = 1
 		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }	# Surface forms and respective mapping entities.
-		bestTIS = self.totalInitialScore( M )
+		bestTIS = self._totalInitialScore( M )
 
 		print( "[ISA][", iteration,"] Initial score starts at", bestTIS )
 
@@ -375,14 +392,14 @@ class NED:
 					if cm != self._surfaceForms[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
 						M[ne] = cm											# Check this candidate substitution.
 
-						tis = self.totalInitialScore( M )
+						tis = self._totalInitialScore( M )
 						if tis > bestTIS:									# Is it improving?
 							foundBetterScore = True
 							bestNE = ne
 							bestCM = cm
 							bestTIS = tis
 
-			if foundBetterScore > 0:										# Did score ever increase?
+			if foundBetterScore:											# Did score ever increase?
 				self._surfaceForms[bestNE].mappingEntityId = bestCM			# New best mapping.
 				print( "[ISA][", iteration ,"] Score increased to", bestTIS )
 				iteration += 1
