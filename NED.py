@@ -186,45 +186,68 @@ class NED:
 				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be skipped...", sys.stderr )
 		print( "... Done!" )
 
-		# Remove projection onto first singular vector (i.e. common discourse vector).
+		### Getting ready for disambiguation ###
+
+		result: Dict[str, Tuple[int, str]] = {}		# Result mapping for each named entity/surface form.
+
 		if self._surfaceForms:
-			print( "[*] Now removing common discourse embedding from surface forms and candidate mapping entities document vectors" )
-			eL = [e.v for eId, e in self._entityMap.items()]		# List of embeddings for entities.
-			sfL = [s.v for sf, s in self._surfaceForms.items()]		# List of surface forms' context embeddings.
-			X = np.array( eL + sfL )								# Matrix whose columns are the embeddings of all docs.
-			svd = TruncatedSVD( n_components=1, random_state=0, n_iter=7 )
-			svd.fit( X )
-			v1 = svd.components_[0,:]								# First component in V (not in U): 300 dimensions.
+			self._removeCommonDiscourseEmbedding()	# Remove projection onto first singular vector (i.e. common discourse vector).
+			self._computeContextSimilarity() 		# Compute context similary of surface forms' BOW with respect to candidates mapping entities.
 
-			for eId in self._entityMap:								# Remove common discourse in entities and surface forms embeddings.
-				self._entityMap[eId].v -= v1 * v1.dot( self._entityMap[eId].v )
-			for sf in self._surfaceForms:
-				self._surfaceForms[sf].v -= v1 * v1.dot( self._surfaceForms[sf].v )
+			# Topical coherence depends on having more than 1 sf.
+			if len( self._surfaceForms ) > 1:
+				# Get an initial approximation to a mapping entity using iterative substitution.
+				# After this we can compute an initial score for each candidate mapping of every surface form.
+				print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
+				self._iterativeSubstitutionAlgorithm()
+				print( "... Done!" )
+			else:
+				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
+				self._chooseBestCandidate_NoTopicalCoherence()
+				print( "... Done!" )
 
-			print( "... Done!" )
+			# Place results in return object.
+			for sf, sfObj in self._surfaceForms.items():
+				result[sf] = ( sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name )
 		else:
 			print( "[X] Nothing to compute!  No valid surface forms collected!", sys.stderr )
-			return {}
 
-		# Compute context similary of surface forms' BOW with respect to each of their candidates mapping entities.
-		print( "[*] Computing context similarity between named entity mentions and candidate mapping entities" )
+		return result
+
+
+	def _chooseBestCandidate_NoTopicalCoherence( self ):
+		"""
+		Choose the best candidate mapping entity for a surface form by only considering the weighted sum of prior
+		probability and context similarity.
+		"""
 		for sf, sfObj in self._surfaceForms.items():
-			for c, cObj in sfObj.candidates.items():
-				cObj.contextSimilarity = self._contextSimilarity( sf, c )	# Store context similarity for later iter. subs. alg.
+			bestScore = 0
+			for cm, cmObj in sfObj.candidates.items():
+				score = self._alpha * cmObj.priorProbability + self._beta * cmObj.contextSimilarity
+				if score > bestScore:
+					bestScore = score
+					sfObj.mappingEntityId = cm		# Upon exiting, surface form object holds ID of best mapping entity.
+
+
+	def _removeCommonDiscourseEmbedding( self ):
+		"""
+		Project each initial document embedding onto first right singular vector of a matrix formed with all of the
+		document vectors.
+		"""
+		print( "[*] Now removing common discourse embedding from surface forms and candidate mapping entities document vectors" )
+		eL = [e.v for eId, e in self._entityMap.items()]  		# List of embeddings for entities.
+		sfL = [s.v for sf, s in self._surfaceForms.items()]  	# List of surface forms' context embeddings.
+		X = np.array( eL + sfL )  								# Matrix whose rows are the embeddings of all docs.
+		svd = TruncatedSVD( n_components=1, random_state=0, n_iter=7 )
+		svd.fit( X )
+		v1 = svd.components_[0, :]  							# First component in V (not in U): 300 dimensions.
+
+		for eId in self._entityMap:  							# Remove common discourse in entities and surface forms embeddings.
+			self._entityMap[eId].v -= v1 * v1.dot( self._entityMap[eId].v )
+		for sf in self._surfaceForms:
+			self._surfaceForms[sf].v -= v1 * v1.dot( self._surfaceForms[sf].v )
+
 		print( "... Done!" )
-
-		# Get an initial approximation to a mapping entity using iterative substitution.
-		# After this we can compute an initial score for each candidate mapping of every surface form.
-		if len( self._surfaceForms ) > 1:							# Topical coherence depends on having more than 1 sf.
-			print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
-			self._iterativeSubstitutionAlgorithm()
-			print( "... Done!" )
-		else:
-			print( "[*] There is only one surface form.  Just prior probability and context similarity will be considered" )
-			# TODO: Get best candidate for unique surface form.
-			print( "... Done!" )
-
-		return {}
 
 
 	def _getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
@@ -298,7 +321,7 @@ class NED:
 		"""
 		record = self._mNed_Linking.find_one( { "_id": e }, projection={ "f": True } )
 		U = set()
-		if record:		# We may have pages not pointing to this one.
+		if record:		# We may have no pages pointing to this one.
 			for u in record["f"]:
 				U.add( int( u ) )
 		return U
@@ -320,17 +343,22 @@ class NED:
 			return 0.0
 
 
-	def _contextSimilarity( self, sf: str, eId: int ) -> float:
+	def _computeContextSimilarity( self ):
 		"""
-		Compute the consine similarity between the document embedding of surface form and a candidate mapping entity.
-		:param sf: Surface form ID (i.e. the "text" itself).
-		:param eId: Candidate mapping entity ID.
-		:return: Cosine similarity.
+		Compute the consine similarity between the document embedding of surface form and all of its candidate mapping entities.
 		"""
-		u = self._surfaceForms[sf].v
-		v = self._entityMap[eId].v
-		cs = u.dot(v) / ( np.linalg.norm( u ) * np.linalg.norm( v ) )
-		return ( 1.0 + cs ) / 2.0	# Normalize to a value between 0 and 1 since with word2vec we can get negative cos sim.
+		print( "[*] Computing context similarity between named entity mentions and candidate mapping entities" )
+		for sf, sfObj in self._surfaceForms.items():
+			for c, cObj in sfObj.candidates.items():
+				u = self._surfaceForms[sf].v
+				v = self._entityMap[c].v
+				cs = u.dot( v ) / (np.linalg.norm( u ) * np.linalg.norm( v ))
+
+				# Store context similarity for later iter. subs. alg.
+				# Normalize to a value between 0 and 1 since with word2vec we can get negative cos sim.
+				cObj.contextSimilarity = ( 1.0 + cs ) / 2.0
+
+		print( "... Done!" )
 
 
 	def _topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
