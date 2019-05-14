@@ -4,7 +4,7 @@ importlib.reload( N )
 
 if __name__ is "__main__":
 	ned = N.NED()
-	results = ned.go( "Datasets/sports.txt" )
+	results = ned.go( "Datasets/berkeley.txt" )
 
 	# Print results.
 	print( "------ Results ------")

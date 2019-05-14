@@ -40,7 +40,9 @@ class Candidate:
 		self.id = eId
 		self.count = count
 		self.priorProbability = 0.0		# To be updated when collecting candidates for a surface form.
-		self.contextSimilarity = 0.0	# TODO: To be updated with the homonym function.
+		self.contextSimilarity = 0.0	# To be updated with the homonym function.
+		self.topicalCoherence = 0.0		# Coh(r_{i,j}) = \frac{1}{|M|-1} \sum_{c=1, c \neq i}^{|M|}TR(r_{i,j}, e_c).
+		self.initialScore = 0.0			# p_{i,j} = \alpha * Pp(r_{i,j}) + \beta * Sim(r_{i,j}) + \gamma * Coh(r_{i,j}).
 
 
 class SurfaceForm:
@@ -116,8 +118,11 @@ class NED:
 
 		# Initial score constants.
 		self._alpha = 0.1
-		self._beta = 0.4
-		self._gamma = 0.5
+		self._beta = 0.6
+		self._gamma = 0.3
+
+		# Map of array index to (surface form, candidate mapping entity ID).
+		self._indexToSFC: List[Tuple[str, int]] = []
 
 
 	def go( self, filePath: str ) -> Dict[str, Tuple[int, str]]:
@@ -200,6 +205,7 @@ class NED:
 				# After this we can compute an initial score for each candidate mapping of every surface form.
 				print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
 				self._iterativeSubstitutionAlgorithm()
+				p = self._assignCandidatesInitialScore()
 				print( "... Done!" )
 			else:
 				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
@@ -213,6 +219,36 @@ class NED:
 			print( "[X] Nothing to compute!  No valid surface forms collected!", sys.stderr )
 
 		return result
+
+
+	def _assignCandidatesInitialScore( self ) -> np.ndarray:
+		"""
+		Assign to each candidate mapping entity an initial score based on the results from the iter. subs. algorithm.
+		Normalize this weight and assign to each pair (sf,cm) a unique int-index to locate its score in an np.array.
+		:return: An np.array holding the normalized initial score for all graph nodes.
+		"""
+		totalScore = 0.0									# Used for normalization of 'node' scores.
+		npk = []											# List of scores.
+		for sf, sfObj in self._surfaceForms.items():
+			M = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }  # Reset to currently best mappings.
+			for cm, cmObj in sfObj.candidates.items():
+				# First compute the topical coherence for each candidate because after the iterative substitution algorithm we
+				# got the best candidate mapping entities for every entity mention.
+				M[sf] = cm  								# Check this candidate.
+				cmObj.topicalCoherence = self._topicalCoherence( sf, M )
+
+				# Then, assign the initial score (unnormalized).
+				cmObj.initialScore = self._alpha * cmObj.priorProbability \
+									 + self._beta * cmObj.contextSimilarity \
+									 + self._gamma * cmObj.topicalCoherence
+				totalScore += cmObj.initialScore
+
+				# Also, assign a unique index for accessing the result np.array of scores.
+				npk.append( cmObj.initialScore )
+				self._indexToSFC.append( ( sf, cm ) )
+
+		# Normalize initial scores among all surface forms' candidate mapping entities so that their sum equals 1.
+		return np.array( npk ) / totalScore
 
 
 	def _chooseBestCandidate_NoTopicalCoherence( self ):
@@ -363,10 +399,10 @@ class NED:
 
 	def _topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
 		"""
-		Compute topical coherence of mapping entity for given surface form with respect to mapping entities of the rest.
+		Compute topical coherence of candidate mapping entity for given surface form with respect to mapping entities of the rest.
 		:param surfaceForm: Central surface form whose (candidate) mapping entity we task as reference.
 		:param M: Mappings for all surface forms (including the central one).
-		:return: Coh(r_{i,j}) = \frac{1}{|M| - 1} \sum_{c=1, c\nej}^{|M|}TR(r_{i,j}, e_{i,c}).
+		:return: Coh(r_{i,j}) = \frac{1}{|M| - 1} \sum_{c=1, c \ne i}^{|M|}TR(r_{i,j}, e_c).
 		"""
 		totalTR = 0
 		for sf in M:
@@ -415,7 +451,7 @@ class NED:
 			bestNE = 0		# Best surface form and candidate mapping.
 			bestCM = 0
 			for ne in self._surfaceForms:
-				M = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }  # Try-out mapping entities.
+				M = { sf: self._surfaceForms[sf].mappingEntityId for sf in self._surfaceForms }  # Try-out mapping entities.
 				for cm in self._surfaceForms[ne].candidates:
 					if cm != self._surfaceForms[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
 						M[ne] = cm											# Check this candidate substitution.
