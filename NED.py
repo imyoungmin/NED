@@ -116,15 +116,15 @@ class NED:
 
 		# Named entities map {"namedEntity1": NamedEntity1, "namedEntity2": NamedEntity2, ...}.
 		self._surfaceForms: Dict[str, SurfaceForm] = {}
-		self._WINDOW_SIZE = 20
+		self._WINDOW_SIZE = 30
 
 		# Initial score constants.
-		self._alpha = 0.1
+		self._alpha = 0.05
 		self._beta = 0.6
-		self._gamma = 0.3
+		self._gamma = 0.35
 
 		# Propagation algorithm constant.
-		self._lambda = 0.3
+		self._lambda = 0.9
 
 		# Map of array index to (surface form, candidate mapping entity ID).
 		self._indexToSFC: List[Tuple[str, int]] = []
@@ -209,6 +209,11 @@ class NED:
 				# Get an initial score for candidate mapping entities using iterative substitution.
 				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
 				self._iterativeSubstitutionAlgorithm()
+
+				for sf, sfObj in self._surfaceForms.items():
+					result[sf] = (sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name)
+				print( result )
+
 				self._propagationAlgorithm()
 			else:
 				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
@@ -300,19 +305,32 @@ class NED:
 		s = np.array( p )								# Final score to be refined iteratively.
 
 		diff = 1.0
-		THRESHOLD = 0.001
+		THRESHOLD = 0.0001
 		iteration = 0
 		while diff > THRESHOLD:
 			ns = self._lambda * p + ( 1.0 - self._lambda ) * B.dot( s )
+			ns /= np.sum( ns )
 			diff = np.linalg.norm( ns - s )
 			s = ns
 			iteration += 1
 			print( "[PA] Iteration", iteration, ", Difference:", diff )
 
+		print( "... Done!" )
+
+		print( "[*] Retrieving best candidate mapping entities for each surface form..." )
+
 		# Assign final scores to candidate mapping entities.
 		for i, finalScore in enumerate( s ):
 			sf, cm = self._indexToSFC[i]
 			self._surfaceForms[sf].candidates[cm].finalScore = finalScore
+
+		# Select the best candidate mapping entity for each surface form.
+		for sf, sfObj in self._surfaceForms.items():
+			bestScore = 0
+			for cm, cmObj in sfObj.candidates.items():
+				if cmObj.finalScore > bestScore:
+					bestScore = cmObj.finalScore
+					sfObj.mappingEntityId = cm
 
 		print( "... Done!" )
 
@@ -440,7 +458,8 @@ class NED:
 		lU2 = len( self._entityMap[u2].pointedToBy )
 		lIntersection = len( self._entityMap[u1].pointedToBy.intersection( self._entityMap[u2].pointedToBy ) )
 		if lIntersection > 0:
-			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
+			# return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
+			return lIntersection / self._WP
 		else:
 			return 0.0
 
