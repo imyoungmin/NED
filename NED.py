@@ -3,6 +3,7 @@ from typing import Set, Dict, Tuple, List
 import sys
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
+from scipy import sparse
 from WikiParser import Parser as P
 import importlib
 
@@ -43,6 +44,7 @@ class Candidate:
 		self.contextSimilarity = 0.0	# To be updated with the homonym function.
 		self.topicalCoherence = 0.0		# Coh(r_{i,j}) = \frac{1}{|M|-1} \sum_{c=1, c \neq i}^{|M|}TR(r_{i,j}, e_c).
 		self.initialScore = 0.0			# p_{i,j} = \alpha * Pp(r_{i,j}) + \beta * Sim(r_{i,j}) + \gamma * Coh(r_{i,j}).
+		self.finalScore = 0.0			# To be updated in the propagation algorithm.
 
 
 class SurfaceForm:
@@ -120,6 +122,9 @@ class NED:
 		self._alpha = 0.1
 		self._beta = 0.6
 		self._gamma = 0.3
+
+		# Propagation algorithm constant.
+		self._lambda = 0.3
 
 		# Map of array index to (surface form, candidate mapping entity ID).
 		self._indexToSFC: List[Tuple[str, int]] = []
@@ -201,12 +206,10 @@ class NED:
 
 			# Topical coherence depends on having more than 1 sf.
 			if len( self._surfaceForms ) > 1:
-				# Get an initial approximation to a mapping entity using iterative substitution.
-				# After this we can compute an initial score for each candidate mapping of every surface form.
-				print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
+				# Get an initial score for candidate mapping entities using iterative substitution.
+				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
 				self._iterativeSubstitutionAlgorithm()
-				p = self._assignCandidatesInitialScore()
-				print( "... Done!" )
+				self._propagationAlgorithm()
 			else:
 				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
 				self._chooseBestCandidate_NoTopicalCoherence()
@@ -249,6 +252,69 @@ class NED:
 
 		# Normalize initial scores among all surface forms' candidate mapping entities so that their sum equals 1.
 		return np.array( npk ) / totalScore
+
+
+	def _buildMatrixB( self ) -> sparse.spmatrix:
+		"""
+		Build the |V|x|V| propagation strength matrix.
+		:return: B matrix.
+		"""
+		nV = len( self._indexToSFC )
+		B = sparse.lil_matrix( ( nV, nV ) )			# B is a sparse matrix for efficient multiplication.
+
+		# We first take advantage of the symmetry of the B matrix.  That is, b_{i,j} is the propagation strength from
+		# node j to node i, where none of i or j belong to the same named entity mention.  In other words, we get a
+		# sparse matrix with a diagonal of 0-blocks, and we just calculate the lower diagonal part (and mirror to upper).
+		# After that, we normalize each column so that its sum totals 1.
+		for j in range( nV ):												# From node j.
+			if self._indexToSFC[j][0] == self._indexToSFC[-1][0]:			# Skipping last surface form.
+				break
+			for i in range( j + 1, nV ):									# To node i.
+				if self._indexToSFC[j][0] == self._indexToSFC[i][0]:		# Skip candidates of the same surface form.
+					continue
+
+				tr = self._topicalRelatedness( self._indexToSFC[j][1], self._indexToSFC[i][1] )
+				if tr > 0:
+					B[i,j] = tr
+					B[j,i] = tr
+
+		# Now do the column normalization.
+		B = B.tocsc()				# Using compressed sparse column matrix format for fast arithmetic operations.
+		c = B.sum( axis=0 )
+		for j in range( nV ):
+			if c[0,j] > 0:			# Avoid division by zero.
+				B[:,j] /= c[0,j]
+
+		return B
+
+
+	def _propagationAlgorithm( self ):
+		"""
+		Apply PageRank collective inference algorithm to compute final candidate mapping entities' scores.
+		Modify in place the final score attribute of each candidate and the final mapping entity for each surface form.
+		"""
+		print( "[*] Executing propagation score algorithm..." )
+
+		p = self._assignCandidatesInitialScore()		# Normalized (candidate) nodes initial score.
+		B = self._buildMatrixB()						# Propagation strength matrix.
+		s = np.array( p )								# Final score to be refined iteratively.
+
+		diff = 1.0
+		THRESHOLD = 0.001
+		iteration = 0
+		while diff > THRESHOLD:
+			ns = self._lambda * p + ( 1.0 - self._lambda ) * B.dot( s )
+			diff = np.linalg.norm( ns - s )
+			s = ns
+			iteration += 1
+			print( "[PA] Iteration", iteration, ", Difference:", diff )
+
+		# Assign final scores to candidate mapping entities.
+		for i, finalScore in enumerate( s ):
+			sf, cm = self._indexToSFC[i]
+			self._surfaceForms[sf].candidates[cm].finalScore = finalScore
+
+		print( "... Done!" )
 
 
 	def _chooseBestCandidate_NoTopicalCoherence( self ):
@@ -431,6 +497,8 @@ class NED:
 		"""
 		Solve for the best entity mappings for all named entities in order to have an initial score.
 		"""
+		print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
+
 		# Pick the candidate with maximum prior probability as first approximation to mapping entity.
 		for sf, sfObj in self._surfaceForms.items():
 			mostPopularProb = 0
@@ -471,3 +539,4 @@ class NED:
 				break						# Stop when we detect a negative performance.
 
 		print( "[ISA] Finalized greedy optimization with an initial score of", bestTIS )
+		print( "... Done!" )
