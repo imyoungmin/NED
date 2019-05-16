@@ -43,8 +43,8 @@ class Candidate:
 		self.priorProbability = 0.0		# To be updated when collecting candidates for a surface form.
 		self.contextSimilarity = 0.0	# To be updated with the homonym function.
 		self.topicalCoherence = 0.0		# Coh(r_{i,j}) = \frac{1}{|M|-1} \sum_{c=1, c \neq i}^{|M|}TR(r_{i,j}, e_c).
-		self.initialScore = 0.0			# p_{i,j} = \alpha * Pp(r_{i,j}) + \beta * Sim(r_{i,j}) + \gamma * Coh(r_{i,j}).
-		self.finalScore = 0.0			# To be updated in the propagation algorithm.
+		self.isaScore = 0.0				# p_{i,j} = \alpha * Pp(r_{i,j}) + \beta * Sim(r_{i,j}) + \gamma * Coh(r_{i,j}).
+		self.paScore = 0.0				# To be updated in the propagation algorithm.
 
 
 class SurfaceForm:
@@ -116,15 +116,15 @@ class NED:
 
 		# Named entities map {"namedEntity1": NamedEntity1, "namedEntity2": NamedEntity2, ...}.
 		self._surfaceForms: Dict[str, SurfaceForm] = {}
-		self._WINDOW_SIZE = 30
+		self._WINDOW_SIZE = 20
 
 		# Initial score constants.
-		self._alpha = 0.05
+		self._alpha = 0.1
 		self._beta = 0.6
-		self._gamma = 0.35
+		self._gamma = 0.4
 
-		# Propagation algorithm constant.
-		self._lambda = 0.9
+		# Propagation algorithm damping constant.
+		self._lambda = 0.85
 
 		# Map of array index to (surface form, candidate mapping entity ID).
 		self._indexToSFC: List[Tuple[str, int]] = []
@@ -208,13 +208,13 @@ class NED:
 			if len( self._surfaceForms ) > 1:
 				# Get an initial score for candidate mapping entities using iterative substitution.
 				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
-				self._iterativeSubstitutionAlgorithm()
+				initialTotalScore = self._iterativeSubstitutionAlgorithm()
 
 				for sf, sfObj in self._surfaceForms.items():
 					result[sf] = (sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name)
 				print( result )
 
-				self._propagationAlgorithm()
+				self._propagationAlgorithm( initialTotalScore )
 			else:
 				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
 				self._chooseBestCandidate_NoTopicalCoherence()
@@ -246,16 +246,20 @@ class NED:
 				cmObj.topicalCoherence = self._topicalCoherence( sf, M )
 
 				# Then, assign the initial score (unnormalized).
-				cmObj.initialScore = self._alpha * cmObj.priorProbability \
+				cmObj.isaScore = self._alpha * cmObj.priorProbability \
 									 + self._beta * cmObj.contextSimilarity \
 									 + self._gamma * cmObj.topicalCoherence
-				totalScore += cmObj.initialScore
+				totalScore += cmObj.isaScore
 
 				# Also, assign a unique index for accessing the result np.array of scores.
-				npk.append( cmObj.initialScore )
+				npk.append( cmObj.isaScore )
 				self._indexToSFC.append( ( sf, cm ) )
 
 		# Normalize initial scores among all surface forms' candidate mapping entities so that their sum equals 1.
+		for _, sfObj in self._surfaceForms.items():
+			for _, cmObj in sfObj.candidates.items():
+				cmObj.isaScore /= totalScore
+
 		return np.array( npk ) / totalScore
 
 
@@ -293,19 +297,22 @@ class NED:
 		return B
 
 
-	def _propagationAlgorithm( self ):
+	def _propagationAlgorithm( self, isaTotalScore: float ):
 		"""
 		Apply PageRank collective inference algorithm to compute final candidate mapping entities' scores.
 		Modify in place the final score attribute of each candidate and the final mapping entity for each surface form.
+		If the propagation final score is not better than the iterative substitution algorithm ending score, keep the
+		latter as the best and assign final mapping entities accordingly.
+		:param isaTotalScore: Iterative substitution ending score.
 		"""
-		print( "[*] Executing propagation score algorithm..." )
+		print( "[*] Executing propagation score algorithm and selecting final candidate mapping entities..." )
 
 		p = self._assignCandidatesInitialScore()		# Normalized (candidate) nodes initial score.
 		B = self._buildMatrixB()						# Propagation strength matrix.
 		s = np.array( p )								# Final score to be refined iteratively.
 
 		diff = 1.0
-		THRESHOLD = 0.0001
+		THRESHOLD = 0.001
 		iteration = 0
 		while diff > THRESHOLD:
 			ns = self._lambda * p + ( 1.0 - self._lambda ) * B.dot( s )
@@ -315,22 +322,30 @@ class NED:
 			iteration += 1
 			print( "[PA] Iteration", iteration, ", Difference:", diff )
 
-		print( "... Done!" )
-
-		print( "[*] Retrieving best candidate mapping entities for each surface form..." )
-
 		# Assign final scores to candidate mapping entities.
-		for i, finalScore in enumerate( s ):
+		for i, paScore in enumerate( s ):
 			sf, cm = self._indexToSFC[i]
-			self._surfaceForms[sf].candidates[cm].finalScore = finalScore
+			self._surfaceForms[sf].candidates[cm].paScore = paScore
 
 		# Select the best candidate mapping entity for each surface form.
+		previousBestMappings: Dict[str, int] = {}
 		for sf, sfObj in self._surfaceForms.items():
 			bestScore = 0
+			previousBestMappings[sf] = sfObj.mappingEntityId	# Recall previous mappings to make a comparison later.
 			for cm, cmObj in sfObj.candidates.items():
-				if cmObj.finalScore > bestScore:
-					bestScore = cmObj.finalScore
+				if cmObj.paScore > bestScore:
+					bestScore = cmObj.paScore
 					sfObj.mappingEntityId = cm
+
+		# Compute new total score.
+		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }
+		paTotalScore = self._totalScore( M )
+		if isaTotalScore > paTotalScore:
+			print( "[!] Score didn't improve, it was", paTotalScore, "Now reverting to ISA mappings" )
+			for sf, sfObj in self._surfaceForms.items():
+				sfObj.mappingEntityId = previousBestMappings[sf]
+		else:
+			print( "   Final total score improved to", paTotalScore )
 
 		print( "... Done!" )
 
@@ -458,8 +473,7 @@ class NED:
 		lU2 = len( self._entityMap[u2].pointedToBy )
 		lIntersection = len( self._entityMap[u1].pointedToBy.intersection( self._entityMap[u2].pointedToBy ) )
 		if lIntersection > 0:
-			# return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
-			return lIntersection / self._WP
+			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
 		else:
 			return 0.0
 
@@ -496,9 +510,9 @@ class NED:
 		return  totalTR / ( len( M ) - 1 )
 
 
-	def _totalInitialScore( self, M: Dict[str, int] ) -> float:
+	def _totalScore( self, M: Dict[str, int] ) -> float:
 		"""
-		Calculate the total initial score for a given set of mapping entities.
+		Calculate the total score for a given set of mapping entities.
 		This function is used in the iterative substitution algorithm to evaluate different candidates performance.
 		:param M: Mapping entities to each surface form.
 		:return: \sum_i^{|M|} ( \alpha * Pp(e_i) + \beta * Sim(e_i) + \gamma * Coh(e_i) )
@@ -512,9 +526,10 @@ class NED:
 		return totalScore
 
 
-	def _iterativeSubstitutionAlgorithm( self ):
+	def _iterativeSubstitutionAlgorithm( self ) -> float:
 		"""
-		Solve for the best entity mappings for all named entities in order to have an initial score.
+		Solve for the best entity mappings for all named entities in order to have an initial or final score.
+		:return Total score.
 		"""
 		print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
 
@@ -528,9 +543,9 @@ class NED:
 
 		iteration = 1
 		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }	# Surface forms and respective mapping entities.
-		bestTIS = self._totalInitialScore( M )
+		bestTIS = self._totalScore( M )
 
-		print( "[ISA][", iteration,"] Initial score starts at", bestTIS )
+		print( "[ISA][", iteration,"] Score starts at", bestTIS )
 
 		while True:
 			# Find the candidate substition that increases the most the total initial score among all candidates and all surface forms.
@@ -543,7 +558,7 @@ class NED:
 					if cm != self._surfaceForms[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
 						M[ne] = cm											# Check this candidate substitution.
 
-						tis = self._totalInitialScore( M )
+						tis = self._totalScore( M )
 						if tis > bestTIS:									# Is it improving?
 							foundBetterScore = True
 							bestNE = ne
@@ -557,5 +572,6 @@ class NED:
 			else:
 				break						# Stop when we detect a negative performance.
 
-		print( "[ISA] Finalized greedy optimization with an initial score of", bestTIS )
+		print( "[ISA] Finalized greedy optimization with a score of", bestTIS )
 		print( "... Done!" )
+		return bestTIS
