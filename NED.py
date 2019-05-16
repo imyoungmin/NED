@@ -119,8 +119,8 @@ class NED:
 		self._WINDOW_SIZE = 20
 
 		# Initial score constants.
-		self._alpha = 0.1
-		self._beta = 0.6
+		self._alpha = 0.15
+		self._beta = 0.55
 		self._gamma = 0.4
 
 		# Propagation algorithm damping constant.
