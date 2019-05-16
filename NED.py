@@ -119,12 +119,12 @@ class NED:
 		self._WINDOW_SIZE = 20
 
 		# Initial score constants.
-		self._alpha = 0.15
-		self._beta = 0.55
-		self._gamma = 0.4
+		self._alpha = 0.5
+		self._beta = 0.5
+		self._gamma = 0.0
 
 		# Propagation algorithm damping constant.
-		self._lambda = 0.85
+		self._lambda = 0.35
 
 		# Map of array index to (surface form, candidate mapping entity ID).
 		self._indexToSFC: List[Tuple[str, int]] = []
@@ -204,20 +204,18 @@ class NED:
 			self._removeCommonDiscourseEmbedding()	# Remove projection onto first singular vector (i.e. common discourse vector).
 			self._computeContextSimilarity() 		# Compute context similary of surface forms' BOW with respect to candidates mapping entities.
 
-			# Topical coherence depends on having more than 1 sf.
+			# Get an initial score for candidate mapping entities using iterative substitution.
+			self._chooseBestCandidate_NoTopicalCoherence()
 			if len( self._surfaceForms ) > 1:
-				# Get an initial score for candidate mapping entities using iterative substitution.
-				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
-				initialTotalScore = self._iterativeSubstitutionAlgorithm()
 
+				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
 				for sf, sfObj in self._surfaceForms.items():
 					result[sf] = (sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name)
 				print( result )
 
-				self._propagationAlgorithm( initialTotalScore )
+				self._propagationAlgorithm()
 			else:
-				print( "[*] There's only one surface form.  Topical coherence will be ignored!" )
-				self._chooseBestCandidate_NoTopicalCoherence()
+				print( "[*] There's only one surface form.  No need for propagation algorithm!" )
 				print( "... Done!" )
 
 			# Place results in return object.
@@ -238,17 +236,9 @@ class NED:
 		totalScore = 0.0									# Used for normalization of 'node' scores.
 		npk = []											# List of scores.
 		for sf, sfObj in self._surfaceForms.items():
-			M = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }  # Reset to currently best mappings.
 			for cm, cmObj in sfObj.candidates.items():
-				# First compute the topical coherence for each candidate because after the iterative substitution algorithm we
-				# got the best candidate mapping entities for every entity mention.
-				M[sf] = cm  								# Check this candidate.
-				cmObj.topicalCoherence = self._topicalCoherence( sf, M )
-
-				# Then, assign the initial score (unnormalized).
-				cmObj.isaScore = self._alpha * cmObj.priorProbability \
-									 + self._beta * cmObj.contextSimilarity \
-									 + self._gamma * cmObj.topicalCoherence
+				# Assign the initial score (unnormalized).
+				cmObj.isaScore = self._alpha * cmObj.priorProbability + self._beta * cmObj.contextSimilarity
 				totalScore += cmObj.isaScore
 
 				# Also, assign a unique index for accessing the result np.array of scores.
@@ -297,13 +287,10 @@ class NED:
 		return B
 
 
-	def _propagationAlgorithm( self, isaTotalScore: float ):
+	def _propagationAlgorithm( self ):
 		"""
 		Apply PageRank collective inference algorithm to compute final candidate mapping entities' scores.
 		Modify in place the final score attribute of each candidate and the final mapping entity for each surface form.
-		If the propagation final score is not better than the iterative substitution algorithm ending score, keep the
-		latter as the best and assign final mapping entities accordingly.
-		:param isaTotalScore: Iterative substitution ending score.
 		"""
 		print( "[*] Executing propagation score algorithm and selecting final candidate mapping entities..." )
 
@@ -337,22 +324,12 @@ class NED:
 					bestScore = cmObj.paScore
 					sfObj.mappingEntityId = cm
 
-		# Compute new total score.
-		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }
-		paTotalScore = self._totalScore( M )
-		if isaTotalScore > paTotalScore:
-			print( "[!] Score didn't improve, it was", paTotalScore, "Now reverting to ISA mappings" )
-			for sf, sfObj in self._surfaceForms.items():
-				sfObj.mappingEntityId = previousBestMappings[sf]
-		else:
-			print( "   Final total score improved to", paTotalScore )
-
 		print( "... Done!" )
 
 
 	def _chooseBestCandidate_NoTopicalCoherence( self ):
 		"""
-		Choose the best candidate mapping entity for a surface form by only considering the weighted sum of prior
+		Choose the best candidate mapping entity for surface forms by only considering the weighted sum of prior
 		probability and context similarity.
 		"""
 		for sf, sfObj in self._surfaceForms.items():
@@ -496,6 +473,7 @@ class NED:
 		print( "... Done!" )
 
 
+	@DeprecationWarning
 	def _topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
 		"""
 		Compute topical coherence of candidate mapping entity for given surface form with respect to mapping entities of the rest.
@@ -510,6 +488,7 @@ class NED:
 		return  totalTR / ( len( M ) - 1 )
 
 
+	@DeprecationWarning
 	def _totalScore( self, M: Dict[str, int] ) -> float:
 		"""
 		Calculate the total score for a given set of mapping entities.
@@ -526,6 +505,7 @@ class NED:
 		return totalScore
 
 
+	@DeprecationWarning
 	def _iterativeSubstitutionAlgorithm( self ) -> float:
 		"""
 		Solve for the best entity mappings for all named entities in order to have an initial or final score.
