@@ -1,10 +1,11 @@
 import importlib
-import NED as N
-importlib.reload( N )
+from Disambiguation import Task as T
+
+importlib.reload( T )
 
 if __name__ is "__main__":
-	ned = N.NED()
-	results = ned.go( "Datasets/madonna.txt" )
+	task = T.Task()
+	results = task.disambiguateTextFile( "Datasets/madonna.txt" )
 
 	# Print results.
 	print( "------ Results ------")

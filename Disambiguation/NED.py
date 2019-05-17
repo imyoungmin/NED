@@ -4,10 +4,6 @@ import sys
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
 from scipy import sparse
-from WikiParser import Parser as P
-import importlib
-
-importlib.reload( P )
 
 
 class Entity:
@@ -130,46 +126,13 @@ class NED:
 		self._indexToSFC: List[Tuple[str, int]] = []
 
 
-	def go( self, filePath: str ) -> Dict[str, Tuple[int, str]]:
+	def go( self, tokens: List[str], surfaceForms: Dict[str, List[Tuple[int, int]]] ) -> Dict[str, Tuple[int, str]]:
 		"""
-		Disambiguate indentified entities given in input text file.
-		:param filePath: File containing text with named entities enclosed in [[.]].
+		Disambiguate indentified entities given in tokenized input list for the input map of identified surface forms.
+		:param tokens: List of tokenized text (including surface form tokens).
+		:param surfaceForms: Dictionary of surface forms with a tuple indicating [start, end) in the token list.
 		:return: Dictionary with surface forms and mapping entities
 		"""
-		with open( filePath, "r", encoding="utf-8" ) as file:
-			text = file.read().lower()
-
-		### Extract named entities and tokenize text ###
-
-		tokens: List[str] = []
-		surfaceForms: Dict[str, List[Tuple[int, int]]] = {}		# Saves surface form and where in the tokens list it appears: [start, end).
-		i = 0								# Start from beginning of text.
-		s = text.find( "[[", i )
-		while s != -1:
-			e = text.find( "]]", s )
-			if e == -1:						# Missing closing ]]?
-				print( "[x] Missing ']]' to enclose a named entity.  Check the input text!", file=sys.stderr )
-				sys.exit( 1 )
-
-			sf = text[s+2:e]				# The surface form.
-			if i < s:						# Tokenize text before named entity.
-				tokens += P.Parser.tokenizeText( text[i:s] )
-			sfTokens = P.Parser.tokenizeText( sf )				# Surface form tokens.
-			sfTokensStart = len( tokens )
-			tokens += sfTokens
-			sfTokensEnd = len( tokens )
-
-			# Add named entity.
-			if surfaceForms.get( sf ) is None:
-				surfaceForms[sf] = []
-			surfaceForms[sf].append( ( sfTokensStart, sfTokensEnd ) )
-
-			i = e + 2
-			s = text.find( "[[", i )
-
-		# Tokenize rest of text.
-		if i < len( text ):
-			tokens += P.Parser.tokenizeText( text[i:] )
 
 		# For each surface form compute an initial 'document' embedding (without common component removed).
 		# Also collect the candidate mapping entities.
@@ -191,9 +154,9 @@ class NED:
 				if candidates:
 					self._surfaceForms[sf] = SurfaceForm( candidates, v )
 				else:
-					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be skipped...", sys.stderr )
+					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be ignored...", sys.stderr )
 			else:
-				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be skipped...", sys.stderr )
+				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be ignored...", sys.stderr )
 		print( "... Done!" )
 
 		### Getting ready for disambiguation ###
@@ -215,14 +178,13 @@ class NED:
 
 				self._propagationAlgorithm()
 			else:
-				print( "[*] There's only one surface form.  No need for propagation algorithm!" )
-				print( "... Done!" )
+				print( "[!] There's only one surface form.  No need for propagation algorithm!" )
 
 			# Place results in return object.
 			for sf, sfObj in self._surfaceForms.items():
 				result[sf] = ( sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name )
 		else:
-			print( "[X] Nothing to compute!  No valid surface forms collected!", sys.stderr )
+			print( "[x] Nothing to compute!  No valid surface forms collected!", sys.stderr )
 
 		return result
 
@@ -473,85 +435,35 @@ class NED:
 		print( "... Done!" )
 
 
-	@DeprecationWarning
-	def _topicalCoherence( self, surfaceForm: str, M: Dict[str, int] ) -> float:
+	def reset( self ):
 		"""
-		Compute topical coherence of candidate mapping entity for given surface form with respect to mapping entities of the rest.
-		:param surfaceForm: Central surface form whose (candidate) mapping entity we task as reference.
-		:param M: Mappings for all surface forms (including the central one).
-		:return: Coh(r_{i,j}) = \frac{1}{|M| - 1} \sum_{c=1, c \ne i}^{|M|}TR(r_{i,j}, e_c).
+		Release map references for surface forms and candidate mapping entities so that this NED object can be reused.
 		"""
-		totalTR = 0
-		for sf in M:
-			if sf != surfaceForm:
-				totalTR += self._topicalRelatedness( M[surfaceForm], M[sf] )
-		return  totalTR / ( len( M ) - 1 )
-
-
-	@DeprecationWarning
-	def _totalScore( self, M: Dict[str, int] ) -> float:
-		"""
-		Calculate the total score for a given set of mapping entities.
-		This function is used in the iterative substitution algorithm to evaluate different candidates performance.
-		:param M: Mapping entities to each surface form.
-		:return: \sum_i^{|M|} ( \alpha * Pp(e_i) + \beta * Sim(e_i) + \gamma * Coh(e_i) )
-		"""
-		totalScore = 0
-		for sf in M:
-			e = self._surfaceForms[sf].candidates[M[sf]]
-			totalScore += self._alpha * e.priorProbability \
-						  + self._beta * e.contextSimilarity \
-						  + self._gamma * self._topicalCoherence( sf, M )
-		return totalScore
-
-
-	@DeprecationWarning
-	def _iterativeSubstitutionAlgorithm( self ) -> float:
-		"""
-		Solve for the best entity mappings for all named entities in order to have an initial or final score.
-		:return Total score.
-		"""
-		print( "[*] Executing iterative substitution algorithm to compute candidate mapping entities' initial scores" )
-
-		# Pick the candidate with maximum prior probability as first approximation to mapping entity.
 		for sf, sfObj in self._surfaceForms.items():
-			mostPopularProb = 0
-			for cm, cmObj in sfObj.candidates.items():
-				if cmObj.priorProbability > mostPopularProb:
-					sfObj.mappingEntityId = cm
-					mostPopularProb = cmObj.priorProbability
+			for cm in sfObj.candidates:
+				del sfObj.candidates[cm]
+			sfObj.candidates.clear()
+			del self._surfaceForms[sf]
 
-		iteration = 1
-		M: Dict[str: int] = { ne: self._surfaceForms[ne].mappingEntityId for ne in self._surfaceForms }	# Surface forms and respective mapping entities.
-		bestTIS = self._totalScore( M )
+		self._surfaceForms.clear()
+		print( "[-] Surface forms and candidate mapping entities released" )
 
-		print( "[ISA][", iteration,"] Score starts at", bestTIS )
 
-		while True:
-			# Find the candidate substition that increases the most the total initial score among all candidates and all surface forms.
-			foundBetterScore = False
-			bestNE = 0		# Best surface form and candidate mapping.
-			bestCM = 0
-			for ne in self._surfaceForms:
-				M = { sf: self._surfaceForms[sf].mappingEntityId for sf in self._surfaceForms }  # Try-out mapping entities.
-				for cm in self._surfaceForms[ne].candidates:
-					if cm != self._surfaceForms[ne].mappingEntityId:		# Skip currently selected best candidate mapping.
-						M[ne] = cm											# Check this candidate substitution.
+	def __del__( self ):
+		"""
+		Destructor.
+		"""
+		self.reset()
 
-						tis = self._totalScore( M )
-						if tis > bestTIS:									# Is it improving?
-							foundBetterScore = True
-							bestNE = ne
-							bestCM = cm
-							bestTIS = tis
+		# Release words and entites.
+		for w in self._wordMap:
+			del self._wordMap[w]
+		self._wordMap.clear()
 
-			if foundBetterScore:											# Did score ever increase?
-				self._surfaceForms[bestNE].mappingEntityId = bestCM			# New best mapping.
-				print( "[ISA][", iteration ,"] Score increased to", bestTIS )
-				iteration += 1
-			else:
-				break						# Stop when we detect a negative performance.
+		for e in self._entityMap:
+			del self._entityMap[e]
+		self._entityMap.clear()
 
-		print( "[ISA] Finalized greedy optimization with a score of", bestTIS )
-		print( "... Done!" )
-		return bestTIS
+		# Close connection to DB.
+		self._mClient.close()
+		print( "[-] NED instance deleted.  Connection to DB 'ned' has been closed" )
