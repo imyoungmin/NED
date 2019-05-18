@@ -77,10 +77,13 @@ class NED:
 	Implementation of Graph-based named entity disambiguation class.
 	"""
 
-	def __init__( self ):
+	def __init__( self, debug=True ):
 		"""
 		Constructor.
+		:param debug: True for printing debug messages, false otherwise.
 		"""
+		self._debug = debug
+
 		# MongoDB connections.
 		self._mClient: pymongo.mongo_client = pymongo.MongoClient( "mongodb://localhost:27017/" )
 		self._mNED = self._mClient["ned"]
@@ -137,7 +140,7 @@ class NED:
 		# For each surface form compute an initial 'document' embedding (without common component removed).
 		# Also collect the candidate mapping entities.
 		# If a surface form doesn't have any candidates, skip it.
-		print( "[*] Now collecting candidate mapping entities for surface forms in input text:" )
+		if self._debug: print( "[*] Now collecting candidate mapping entities for surface forms in input text:" )
 		for sf in surfaceForms:
 			words: Set[str] = set()
 			for occurrence in surfaceForms[sf]:
@@ -154,10 +157,10 @@ class NED:
 				if candidates:
 					self._surfaceForms[sf] = SurfaceForm( candidates, v )
 				else:
-					print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be ignored...", sys.stderr )
+					if self._debug: print( "[W] Surface form [", sf, "] doesn't have any candidate mapping entity!  Will be ignored...", sys.stderr )
 			else:
-				print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be ignored...", sys.stderr )
-		print( "... Done!" )
+				if self._debug: print( "[W] Surface form [", sf, "] doesn't have a valid document embedding!  Will be ignored...", sys.stderr )
+		if self._debug: print( "... Done!" )
 
 		### Getting ready for disambiguation ###
 
@@ -167,24 +170,26 @@ class NED:
 			self._removeCommonDiscourseEmbedding()	# Remove projection onto first singular vector (i.e. common discourse vector).
 			self._computeContextSimilarity() 		# Compute context similary of surface forms' BOW with respect to candidates mapping entities.
 
-			# Get an initial score for candidate mapping entities using iterative substitution.
+			# Get an initial score for candidate mapping entities.
 			self._chooseBestCandidate_NoTopicalCoherence()
 			if len( self._surfaceForms ) > 1:
 
 				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
-				for sf, sfObj in self._surfaceForms.items():
-					result[sf] = (sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name)
-				print( result )
+				if self._debug:
+					print( "----------------------------- Initial results -----------------------------" )
+					for sf, sfObj in self._surfaceForms.items():
+						print( "*", sf, ": (", sfObj.mappingEntityId, ") ", self._entityMap[sfObj.mappingEntityId].name )
+					print( "---------------------------------------------------------------------------" )
 
 				self._propagationAlgorithm()
 			else:
-				print( "[!] There's only one surface form.  No need for propagation algorithm!" )
+				if self._debug: print( "[!] There's only one surface form.  No need for propagation algorithm!" )
 
 			# Place results in return object.
 			for sf, sfObj in self._surfaceForms.items():
 				result[sf] = ( sfObj.mappingEntityId, self._entityMap[sfObj.mappingEntityId].name )
 		else:
-			print( "[x] Nothing to compute!  No valid surface forms collected!", sys.stderr )
+			if self._debug: print( "[x] Nothing to compute!  No valid surface forms collected!", sys.stderr )
 
 		return result
 
@@ -254,7 +259,7 @@ class NED:
 		Apply PageRank collective inference algorithm to compute final candidate mapping entities' scores.
 		Modify in place the final score attribute of each candidate and the final mapping entity for each surface form.
 		"""
-		print( "[*] Executing propagation score algorithm and selecting final candidate mapping entities..." )
+		if self._debug: print( "[*] Executing propagation score algorithm and selecting final candidate mapping entities..." )
 
 		p = self._assignCandidatesInitialScore()		# Normalized (candidate) nodes initial score.
 		B = self._buildMatrixB()						# Propagation strength matrix.
@@ -269,7 +274,7 @@ class NED:
 			diff = np.linalg.norm( ns - s )
 			s = ns
 			iteration += 1
-			print( "[PA] Iteration", iteration, ", Difference:", diff )
+			if self._debug: print( "[PA] Iteration", iteration, ", Difference:", diff )
 
 		# Assign final scores to candidate mapping entities.
 		for i, paScore in enumerate( s ):
@@ -286,7 +291,7 @@ class NED:
 					bestScore = cmObj.paScore
 					sfObj.mappingEntityId = cm
 
-		print( "... Done!" )
+		if self._debug: print( "... Done!" )
 
 
 	def _chooseBestCandidate_NoTopicalCoherence( self ):
@@ -308,7 +313,7 @@ class NED:
 		Project each initial document embedding onto first right singular vector of a matrix formed with all of the
 		document vectors.
 		"""
-		print( "[*] Now removing common discourse embedding from surface forms and candidate mapping entities document vectors" )
+		if self._debug: print( "[*] Now removing common discourse embedding from surface forms and candidate mapping entities document vectors" )
 		eL = [e.v for eId, e in self._entityMap.items()]  		# List of embeddings for entities.
 		sfL = [s.v for sf, s in self._surfaceForms.items()]  	# List of surface forms' context embeddings.
 		X = np.array( eL + sfL )  								# Matrix whose rows are the embeddings of all docs.
@@ -321,7 +326,7 @@ class NED:
 		for sf in self._surfaceForms:
 			self._surfaceForms[sf].v -= v1 * v1.dot( self._surfaceForms[sf].v )
 
-		print( "... Done!" )
+		if self._debug: print( "... Done!" )
 
 
 	def _getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
@@ -333,10 +338,18 @@ class NED:
 		"""
 		result = {}
 		record1 = self._mNed_Dictionary.find_one( { "_id": m_i }, projection={ "m": True } )
+		oneCounters = 0											# Count number of documents with 'count' 1 if skipOneCounters is true.
 		if record1:
 			total = 0											# Accumulate reference count for this surface form by the candidate mappings.
+
+			skipOneCounters = len( record1["m"] ) > 75			# If there are a lot of candidates skip those with a count of 1.
+
 			for r_j in record1["m"]:
 				r = int( r_j )
+
+				if skipOneCounters and record1["m"][r_j] == 1:
+					oneCounters += 1
+					continue
 
 				# Check the cache for entity.
 				if self._entityMap.get( r ) is None:
@@ -355,7 +368,7 @@ class NED:
 			for r in result:
 				result[r].priorProbability = result[r].count / total
 
-		print( "[*] Collected", len( result ), "candidate entities for [", m_i, "]" )
+		if self._debug: print( "    Collected", len( result ), "candidate entities for [", m_i, "]. Skipped", oneCounters, "one-counters." )
 		return result			# Empty if no candidates were found for given entity mention.
 
 
@@ -421,7 +434,7 @@ class NED:
 		"""
 		Compute the consine similarity between the document embedding of surface form and all of its candidate mapping entities.
 		"""
-		print( "[*] Computing context similarity between named entity mentions and candidate mapping entities" )
+		if self._debug: print( "[*] Computing context similarity between named entity mentions and candidate mapping entities" )
 		for sf, sfObj in self._surfaceForms.items():
 			for c, cObj in sfObj.candidates.items():
 				u = self._surfaceForms[sf].v
@@ -432,21 +445,21 @@ class NED:
 				# Normalize to a value between 0 and 1 since with word2vec we can get negative cos sim.
 				cObj.contextSimilarity = ( 1.0 + cs ) / 2.0
 
-		print( "... Done!" )
+		if self._debug: print( "... Done!" )
 
 
 	def reset( self ):
 		"""
 		Release map references for surface forms and candidate mapping entities so that this NED object can be reused.
 		"""
-		for sf, sfObj in self._surfaceForms.items():
-			for cm in sfObj.candidates:
-				del sfObj.candidates[cm]
-			sfObj.candidates.clear()
+		for sf in list( self._surfaceForms ):							# Forced to create a copy of the dict keys so
+			candidateList = list( self._surfaceForms[sf].candidates )	# we can safely delete references.
+			for cm in candidateList:
+				del self._surfaceForms[sf].candidates[cm]
+			self._surfaceForms[sf].candidates.clear()
 			del self._surfaceForms[sf]
 
 		self._surfaceForms.clear()
-		print( "[-] Surface forms and candidate mapping entities released" )
 
 
 	def __del__( self ):
@@ -456,14 +469,14 @@ class NED:
 		self.reset()
 
 		# Release words and entites.
-		for w in self._wordMap:
+		for w in list( self._wordMap ):
 			del self._wordMap[w]
 		self._wordMap.clear()
 
-		for e in self._entityMap:
+		for e in list( self._entityMap ):
 			del self._entityMap[e]
 		self._entityMap.clear()
 
 		# Close connection to DB.
 		self._mClient.close()
-		print( "[-] NED instance deleted.  Connection to DB 'ned' has been closed" )
+		if self._debug: print( "[-] NED instance deleted.  Connection to DB 'ned' has been closed" )

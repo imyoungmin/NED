@@ -4,10 +4,9 @@ from Disambiguation import Task as T
 importlib.reload( T )
 
 if __name__ is "__main__":
-	task = T.Task()
-	results = task.disambiguateTextFile( "Datasets/madonna.txt" )
+	# Disambiguating regular text with labeled named entity mentions.
+	results = T.Task.disambiguateTextFile( "Datasets/madonna.txt" )
 
-	# Print results.
-	print( "------ Results ------")
-	for sf, rt in results.items():
-		print( sf, rt )
+	# Disambiguating entities in a big dataset to measure accuracy.
+	# T.Task.debug = False
+	# T.Task.evaluateAccuracy( "Datasets/AIDA-YAGO2-dataset.tsv" )
