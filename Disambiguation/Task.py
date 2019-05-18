@@ -2,12 +2,33 @@ from typing import Dict, Tuple, List
 import sys
 import re
 import time
+from multiprocessing import Pool
 from . import NED as N
 from WikiParser import Parser as P
 import importlib
 
 importlib.reload( N )
 importlib.reload( P )
+
+
+class DatasetDocument:
+	"""
+	Auxiliary class to process dataset documents in parallel.
+	"""
+	def __init__( self, docTitle: str, tokens: List[str], surfaceForms: Dict[str, List[Tuple[int, int]]], expectedMappings: Dict[str, int], startTime: float ):
+		"""
+		Constructor.
+		:param docTitle: Document title.
+		:param tokens: List of ordered tokens.
+		:param surfaceForms: Surface forms detected with tuples for their ocurrences in the token list.
+		:param expectedMappings: For each surface form the expected mapping entity ID.
+		:param startTime: When we started processing this document.
+		"""
+		self.docTitle = docTitle
+		self.tokens = tokens
+		self.surfaceForms = surfaceForms
+		self.expectedMappings = expectedMappings
+		self.startTime = startTime
 
 
 class Task:
@@ -44,6 +65,10 @@ class Task:
 			sfTokensStart = -1									# Keep track of token delimiter indices for a surface form: [sfTokenStart, sfTokenEnd).
 			tokensIndex = -1
 			processingSF = ""									# Currently processing tokens for this surface form.
+
+			MAX_CHUNK_COUNT = 10								# Accumulate documents to process in parallel in this list.
+			chunks: List[DatasetDocument] = []
+
 			for line in file.readlines():
 				line = line.strip()
 				if not line: continue
@@ -53,13 +78,17 @@ class Task:
 						if sfTokensStart > 0:					# Check whether we were reading tokens of a "last" named entity.
 							surfaceForms[processingSF].append( (sfTokensStart, tokensIndex) )
 
-						totals = Task._processDatasetDocument( tokens, surfaceForms, expectedMappings )
-						total += totals[0]						# Accumulate results.
-						totalCorrect += totals[1]
-						totalNIL += totals[2]
-						totalDocs += 1
-						print( "   Done with document", docTitle, ". Totals:", totals, "After", time.time() - startTime, "secs." )
-						break									# TODO: remove.
+						# Add dataset document to chunks and check if we start processing the latter.
+						chunks.append( DatasetDocument( docTitle, tokens, surfaceForms, expectedMappings, startTime ) )
+						if len( chunks ) == MAX_CHUNK_COUNT:
+							totals = Task._processDatasetChunks( chunks )
+							total += totals[0]  				# Accumulate results.
+							totalCorrect += totals[1]
+							totalNIL += totals[2]
+							totalDocs += totals[3]
+							chunks = []
+
+						if totalDocs == MAX_CHUNK_COUNT: break	# TODO: remove break -- doesn't work for 100 e.g.
 					elif docTitle:								# Skip error if this is the first document.
 						print( "[!]", docTitle, "has no contents!", sys.stderr )
 
@@ -99,17 +128,17 @@ class Task:
 					tokens.append( parts[0].lower().strip() )
 					tokensIndex += 1					# Basically keeps track of all valid tokens in doc.
 
-			# TODO: Remove.
+			# TODO: Remove comment.
 			# if documentHasContents:  					# Process last loaded document if any.
 			# 	if sfTokensStart > 0:  					# Check whether we were reading tokens of a "last" named entity.
 			# 		surfaceForms[processingSF].append( (sfTokensStart, tokensIndex) )
 			#
-			# 	totals = self._processDatasetDocument( tokens, surfaceForms, expectedMappings )
-			# 	total += totals[0]  					# Accumulate results.
+			# 	chunks.append( DatasetDocument( docTitle, tokens, surfaceForms, expectedMappings, startTime ) )
+			# 	totals = Task._processDatasetChunks( chunks )
+			# 	total += totals[0]  # Accumulate results.
 			# 	totalCorrect += totals[1]
 			# 	totalNIL += totals[2]
-			# 	totalDocs += 1
-			# 	print( "+ Done with document ", docTitle, ". Totals:", totals, "In", time.time() - startTime, "secs." )
+			# 	totalDocs += totals[3]
 
 		# Present statistics.
 		print( "\n------------------------------- Statistics ------------------------------" )
@@ -121,14 +150,43 @@ class Task:
 
 
 	@staticmethod
-	def _processDatasetDocument( tokens: List[str], surfaceForms: Dict[str, List[Tuple[int, int]]], expectedMappings: Dict[str, int] ) -> (int, int, int):
+	def _processDatasetChunks( chunks: List[DatasetDocument] ) -> Tuple[int, int, int, int]:
+		"""
+		Process groups of dataset documents in parallel.
+		:param chunks: Group of dataset documents.
+		:return: Tuple containing (Total no. of surface forms, Total no. of correct mappings, Total no. of NIL, Total no. of effective docs).
+		"""
+		pool = Pool()
+		stats = pool.map( Task._processDatasetDocument, chunks )  	# Each document object in its own thread.
+		pool.close()
+		pool.join()  												# Close pool and wait for work to finish.
+
+		total = 0				# Surface forms intented.
+		totalCorrect = 0		# Surface forms correctly matched.
+		totalNIL = 0			# Surface forms with no candidates.
+		totalDocs = 0			# Number of effective, nonempty dataset documents.
+		for totals in stats:	# Accumulate results.
+			if totals[0] > 0:
+				total += totals[0]
+				totalCorrect += totals[1]
+				totalNIL += totals[2]
+				totalDocs += 1
+
+		return total, totalCorrect, totalNIL, totalDocs
+
+
+	@staticmethod
+	def _processDatasetDocument( datasetDocument: DatasetDocument ) -> (int, int, int):
 		"""
 		Process and evaluate accuracy of an individual dataset document.
-		:param tokens: List of tokenized text (including surface form tokens).
-		:param surfaceForms: Dictionary of surface forms with a tuple indicating [start, end) in the token list.
-		:param expectedMappings: Dicitonary of surface forms with expected mapping entity ID.
+		:param datasetDocument: Document to process.
 		:return: A tuple (Total no. of surface forms, Total no. of correct mappings, Total no. of NIL).
 		"""
+		# Extract inputs.
+		tokens = datasetDocument.tokens
+		surfaceForms = datasetDocument.surfaceForms
+		expectedMappings = datasetDocument.expectedMappings
+
 		ned = N.NED( Task.debug )  					# A NED object opens its own connection to the Mongo "ned" DB.
 		results = ned.go( tokens, surfaceForms )	# Evaluation.
 
@@ -143,6 +201,8 @@ class Task:
 					totalCorrect += 1
 			else:
 				totalNIL += 1
+
+		print( "<< Done with document", datasetDocument.docTitle, ". Totals:", (total, totalCorrect, totalNIL), "After", time.time() - datasetDocument.startTime, "secs." )
 
 		return total, totalCorrect, totalNIL
 

@@ -3,6 +3,7 @@ from typing import Set, Dict, Tuple, List
 import sys
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
+from multiprocessing import Value
 from scipy import sparse
 
 
@@ -78,10 +79,10 @@ class NED:
 	"""
 
 
-	# Theses static variables prevent querying the DB and some files for all instances of these class.
-	_WP = -1			# A negative value indicates we need to load their values.
-	_LOG_WP = -1
-	_TOTAL_WORD_FREQ_COUNT = -1
+	# These static and shared variables prevent querying the DB and some files for all (multiprocessing) instances of these class.
+	_WP = Value( "i", -1 )			# A negative value indicates we need to load their values.
+	_LOG_WP = Value( "d", -1.0 )
+	_TOTAL_WORD_FREQ_COUNT = Value( "d", -1.0 )
 
 	def __init__( self, debug=True ):
 		"""
@@ -103,17 +104,18 @@ class NED:
 		self._mNed_Dictionary: pymongo.collection = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
 		self._mNed_Linking: pymongo.collection = self._mNED["ned_linking"]  		# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
 
-		# Retrieve static constants.
-		if NED._WP < 0 or NED._LOG_WP < 0 or NED._TOTAL_WORD_FREQ_COUNT < 0:
-			# Retrieve total number of entities recorded in DB.
-			NED._WP = self._mEntity_ID.count()
-			NED._LOG_WP = np.log( NED._WP )											# Log used in topic relatedness metric.
-			print( "NED initialized with", NED._WP, "entities" )
+		# Retrieve shared static constants if they haven't been loaded.
+		with NED._WP.get_lock():
+			if NED._WP.value < 0 or NED._LOG_WP.value < 0 or NED._TOTAL_WORD_FREQ_COUNT.value < 0:
+				# Retrieve total number of entities recorded in DB.
+				NED._WP.value = self._mEntity_ID.count()
+				NED._LOG_WP.value = np.log( NED._WP.value )							# Log used in topic relatedness metric.
+				print( "NED initialized with", NED._WP.value, "entities" )
 
-			# Read total word frequencies and initialize map of word objects.
-			with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
-				NED._TOTAL_WORD_FREQ_COUNT = float( fIn.read() )
-			print( "NED initialized with", NED._TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
+				# Read total word frequencies and initialize map of word objects.
+				with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
+					NED._TOTAL_WORD_FREQ_COUNT.value = float( fIn.read() )
+				print( "NED initialized with", NED._TOTAL_WORD_FREQ_COUNT.value, "total word frequency count" )
 
 		self._wordMap: Dict[str, Word] = {}
 
@@ -368,6 +370,8 @@ class NED:
 					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity into cache.
 					record3 = self._mSif_Documents.find_one( { "_id": r } )								# Extract words and frequencies in entity document.
 					vd = self._getRawDocumentEmbedding( record3["w"], record3["f"] )					# Get an initial document embedding (without common component removed).
+					if not np.count_nonzero( vd ): continue		# Skip an entity with no doc embedding.
+
 					self._entityMap[r] = Entity( r, record2["e"], U, vd )
 
 				result[r] = Candidate( r, record1["m"][r_j] )	# Candidate has a reference ID to the entity object.
@@ -391,22 +395,25 @@ class NED:
 		"""
 		vd = np.zeros( 300 )
 
-		totalFreq = 0.0									# Count freqs of effective words in document for normalization.
+		totalFreq = 0.0										# Count freqs of effective words in document for normalization.
 		for i, w in enumerate( words ):
 			f = freqs[i]
-			if self._wordMap.get( w ) is None:			# Not in cache?
+			if self._wordMap.get( w ) is None:				# Not in cache?
 				r = self._mWord_Embeddings.find_one( { "_id": w } )
 				if r is None:
 					continue								# Skip words not in the vocabulary.
 
 				vw = r["e"]									# Word embedding and probability.
-				p = r["f"] / self._TOTAL_WORD_FREQ_COUNT
+				p = r["f"] / self._TOTAL_WORD_FREQ_COUNT.value
 				self._wordMap[w] = Word( vw, p )			# Cache word object.
 
 			vd += f * self._a / ( self._a + self._wordMap[w].p ) * self._wordMap[w].v
 			totalFreq += f
 
-		return vd / totalFreq		# Still need to subtract proj onto first singular vector (i.e. common discourse vector).
+		if totalFreq > 0:
+			return vd / totalFreq		# Still need to subtract proj onto first singular vector (i.e. common discourse vector).
+		else:
+			return  vd
 
 
 	def _getPagesLikingTo( self, e: int ) -> Set[int]:
@@ -434,7 +441,7 @@ class NED:
 		lU2 = len( self._entityMap[u2].pointedToBy )
 		lIntersection = len( self._entityMap[u1].pointedToBy.intersection( self._entityMap[u2].pointedToBy ) )
 		if lIntersection > 0:
-			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( NED._LOG_WP - np.log( min( lU1, lU2 ) ) )
+			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( NED._LOG_WP.value - np.log( min( lU1, lU2 ) ) )
 		else:
 			return 0.0
 
