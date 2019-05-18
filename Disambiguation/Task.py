@@ -33,6 +33,8 @@ class Task:
 
 		totalStartTime = startTime = time.time()
 
+		print( "**************************** Evaluating Accuracy ****************************" )
+
 		with open( datasetPath, "r", encoding="utf-8" ) as file:
 			documentHasContents = False
 			tokens: List[str] = []								# Tokens of individual documents in the dataset.
@@ -56,7 +58,7 @@ class Task:
 						totalCorrect += totals[1]
 						totalNIL += totals[2]
 						totalDocs += 1
-						print( "+ Done with document", docTitle, ". Totals:", totals, "In", time.time() - startTime, "secs." )
+						print( "   Done with document", docTitle, ". Totals:", totals, "After", time.time() - startTime, "secs." )
 						break									# TODO: remove.
 					elif docTitle:								# Skip error if this is the first document.
 						print( "[!]", docTitle, "has no contents!", sys.stderr )
@@ -69,6 +71,7 @@ class Task:
 					tokensIndex = 0						# Ready to read first token.
 					sfTokensStart = -1
 					startTime = time.time()
+					print( ">> Now processing document", docTitle, "..." )
 				else:
 					# Process doc's line content: one token per line, but possibly line is split in several columns.
 					parts = line.split( "\t" )
@@ -109,7 +112,7 @@ class Task:
 			# 	print( "+ Done with document ", docTitle, ". Totals:", totals, "In", time.time() - startTime, "secs." )
 
 		# Present statistics.
-		print( "\n----------------------------- Statistics -----------------------------" )
+		print( "\n------------------------------- Statistics ------------------------------" )
 		print( "+ Documents:", totalDocs )
 		print( "+ Surface forms:", total )
 		print( "        Correct:", totalCorrect )
@@ -151,6 +154,8 @@ class Task:
 		:param filePath: Path to file to disambiguate
 		:return: Dictionary with surface forms and mapping entities
 		"""
+		print( "**************************** Disambiguating Named Entities in Text ****************************" )
+
 		ned = N.NED( Task.debug )  								# NED object opens its own connection to the Mongo "ned" DB.
 
 		with open( filePath, "r", encoding="utf-8" ) as file:

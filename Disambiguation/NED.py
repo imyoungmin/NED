@@ -77,6 +77,12 @@ class NED:
 	Implementation of Graph-based named entity disambiguation class.
 	"""
 
+
+	# Theses static variables prevent querying the DB and some files for all instances of these class.
+	_WP = -1			# A negative value indicates we need to load their values.
+	_LOG_WP = -1
+	_TOTAL_WORD_FREQ_COUNT = -1
+
 	def __init__( self, debug=True ):
 		"""
 		Constructor.
@@ -97,15 +103,18 @@ class NED:
 		self._mNed_Dictionary: pymongo.collection = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
 		self._mNed_Linking: pymongo.collection = self._mNED["ned_linking"]  		# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
 
-		# Retrieve total number of entities recorded in DB.
-		self._WP = self._mEntity_ID.count()
-		self._LOG_WP = np.log( self._WP )											# Log used in topic relatedness metric.
-		print( "NED initialized with", self._WP, "entities" )
+		# Retrieve static constants.
+		if NED._WP < 0 or NED._LOG_WP < 0 or NED._TOTAL_WORD_FREQ_COUNT < 0:
+			# Retrieve total number of entities recorded in DB.
+			NED._WP = self._mEntity_ID.count()
+			NED._LOG_WP = np.log( NED._WP )											# Log used in topic relatedness metric.
+			print( "NED initialized with", NED._WP, "entities" )
 
-		# Read total word frequencies and initialize map of word objects.
-		with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
-			self._TOTAL_WORD_FREQ_COUNT = float( fIn.read() )
-		print( "NED initialized with", self._TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
+			# Read total word frequencies and initialize map of word objects.
+			with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
+				NED._TOTAL_WORD_FREQ_COUNT = float( fIn.read() )
+			print( "NED initialized with", NED._TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
+
 		self._wordMap: Dict[str, Word] = {}
 
 		self._a = 0.001																# Parameter 'a' for SIF.
@@ -425,7 +434,7 @@ class NED:
 		lU2 = len( self._entityMap[u2].pointedToBy )
 		lIntersection = len( self._entityMap[u1].pointedToBy.intersection( self._entityMap[u2].pointedToBy ) )
 		if lIntersection > 0:
-			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( self._LOG_WP - np.log( min( lU1, lU2 ) ) )
+			return 1.0 - ( np.log( max( lU1, lU2 ) ) - np.log( lIntersection ) ) / ( NED._LOG_WP - np.log( min( lU1, lU2 ) ) )
 		else:
 			return 0.0
 
