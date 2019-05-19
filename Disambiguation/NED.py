@@ -134,7 +134,7 @@ class NED:
 		self._gamma = 0.0
 
 		# Propagation algorithm damping constant.
-		self._lambda = 0.35
+		self._lambda = 0.4
 
 		# Map of array index to (surface form, candidate mapping entity ID).
 		self._indexToSFC: List[Tuple[str, int]] = []
