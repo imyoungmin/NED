@@ -66,7 +66,7 @@ class Task:
 			tokensIndex = -1
 			processingSF = ""									# Currently processing tokens for this surface form.
 
-			MAX_CHUNK_COUNT = 10								# Accumulate documents to process in parallel in this list.
+			MAX_CHUNK_COUNT = 100								# Accumulate documents to process in parallel in this list.
 			chunks: List[DatasetDocument] = []
 
 			for line in file.readlines():
@@ -88,7 +88,6 @@ class Task:
 							totalDocs += totals[3]
 							chunks = []
 
-						if totalDocs == MAX_CHUNK_COUNT: break	# TODO: remove break -- doesn't work for 100 e.g.
 					elif docTitle:								# Skip error if this is the first document.
 						print( "[!]", docTitle, "has no contents!", sys.stderr )
 
@@ -128,17 +127,16 @@ class Task:
 					tokens.append( parts[0].lower().strip() )
 					tokensIndex += 1					# Basically keeps track of all valid tokens in doc.
 
-			# TODO: Remove comment.
-			# if documentHasContents:  					# Process last loaded document if any.
-			# 	if sfTokensStart > 0:  					# Check whether we were reading tokens of a "last" named entity.
-			# 		surfaceForms[processingSF].append( (sfTokensStart, tokensIndex) )
-			#
-			# 	chunks.append( DatasetDocument( docTitle, tokens, surfaceForms, expectedMappings, startTime ) )
-			# 	totals = Task._processDatasetChunks( chunks )
-			# 	total += totals[0]  # Accumulate results.
-			# 	totalCorrect += totals[1]
-			# 	totalNIL += totals[2]
-			# 	totalDocs += totals[3]
+			if documentHasContents:  					# Process last loaded document if any.
+				if sfTokensStart > 0:  					# Check whether we were reading tokens of a "last" named entity.
+					surfaceForms[processingSF].append( (sfTokensStart, tokensIndex) )
+
+				chunks.append( DatasetDocument( docTitle, tokens, surfaceForms, expectedMappings, startTime ) )
+				totals = Task._processDatasetChunks( chunks )
+				total += totals[0]  					# Accumulate results.
+				totalCorrect += totals[1]
+				totalNIL += totals[2]
+				totalDocs += totals[3]
 
 		# Present statistics.
 		print( "\n------------------------------- Statistics ------------------------------" )
@@ -166,8 +164,8 @@ class Task:
 		totalNIL = 0			# Surface forms with no candidates.
 		totalDocs = 0			# Number of effective, nonempty dataset documents.
 		for totals in stats:	# Accumulate results.
-			if totals[0] > 0:
-				total += totals[0]
+			if totals[0] - totals[2] > 0:		# There can be the case that a doc has X surface forms, but none is in the KB.
+				total += totals[0]				# So we only count effective docs.
 				totalCorrect += totals[1]
 				totalNIL += totals[2]
 				totalDocs += 1
@@ -202,7 +200,9 @@ class Task:
 			else:
 				totalNIL += 1
 
-		print( "<< Done with document", datasetDocument.docTitle, ". Totals:", (total, totalCorrect, totalNIL), "After", time.time() - datasetDocument.startTime, "secs." )
+		# Print with tabs for postprocessing stats.
+		print( "<< Done with doc", datasetDocument.docTitle, "after", time.time() - datasetDocument.startTime, "secs.",
+			   "Stats:\t", total, "\t", totalCorrect, "\t", totalNIL, "\t", ( totalCorrect / (total - totalNIL) if total - totalNIL > 0 else 0 )  )
 
 		return total, totalCorrect, totalNIL
 

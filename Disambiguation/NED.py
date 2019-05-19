@@ -353,7 +353,7 @@ class NED:
 		if record1:
 			total = 0											# Accumulate reference count for this surface form by the candidate mappings.
 
-			skipOneCounters = len( record1["m"] ) > 75			# If there are a lot of candidates skip those with a count of 1.
+			skipOneCounters = len( record1["m"] ) > 50			# If there are a lot of candidates skip those with a count of 1.
 
 			for r_j in record1["m"]:
 				r = int( r_j )
