@@ -200,9 +200,10 @@ class Task:
 			else:
 				totalNIL += 1
 
-		# Print with tabs for postprocessing stats.
-		print( "<< Done with doc", datasetDocument.docTitle, "after", time.time() - datasetDocument.startTime, "secs.",
-			   "Stats:\t", total, "\t", totalCorrect, "\t", totalNIL, "\t", ( totalCorrect / (total - totalNIL) if total - totalNIL > 0 else 0 )  )
+		# Print with tabs for postprocessing stats: only docs for which there ARE entities to disambiguate.
+		if total - totalNIL > 0:
+			print( "<< Done with doc", datasetDocument.docTitle, "after", time.time() - datasetDocument.startTime, "secs.",
+				   "Stats:\t", total, "\t", totalCorrect, "\t", totalNIL, "\t", totalCorrect / (total - totalNIL) )
 
 		return total, totalCorrect, totalNIL
 

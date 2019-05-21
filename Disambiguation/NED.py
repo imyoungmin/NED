@@ -129,8 +129,8 @@ class NED:
 		self._WINDOW_SIZE = 20
 
 		# Initial score constants.
-		self._alpha = 0.5
-		self._beta = 0.5
+		self._alpha = 0.4
+		self._beta = 0.6
 		self._gamma = 0.0
 
 		# Propagation algorithm damping constant.
@@ -185,14 +185,15 @@ class NED:
 			self._chooseBestCandidate_NoTopicalCoherence()
 			if len( self._surfaceForms ) > 1:
 
-				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
 				if self._debug:
 					print( "----------------------------- Initial results -----------------------------" )
 					for sf, sfObj in self._surfaceForms.items():
 						print( "*", sf, ": (", sfObj.mappingEntityId, ") ", self._entityMap[sfObj.mappingEntityId].name )
 					print( "---------------------------------------------------------------------------" )
 
+				# Then, apply the page rank algorithm to calculate final candidate mapping entity scores.
 				self._propagationAlgorithm()
+				self._reReranking()
 			else:
 				if self._debug: print( "[!] There's only one surface form.  No need for propagation algorithm!" )
 
@@ -270,7 +271,7 @@ class NED:
 		Apply PageRank collective inference algorithm to compute final candidate mapping entities' scores.
 		Modify in place the final score attribute of each candidate and the final mapping entity for each surface form.
 		"""
-		if self._debug: print( "[*] Executing propagation score algorithm and selecting final candidate mapping entities..." )
+		if self._debug: print( "[*] Executing propagation score algorithm..." )
 
 		p = self._assignCandidatesInitialScore()		# Normalized (candidate) nodes initial score.
 		B = self._buildMatrixB()						# Propagation strength matrix.
@@ -293,16 +294,68 @@ class NED:
 			self._surfaceForms[sf].candidates[cm].paScore = paScore
 
 		# Select the best candidate mapping entity for each surface form.
-		previousBestMappings: Dict[str, int] = {}
 		for sf, sfObj in self._surfaceForms.items():
 			bestScore = 0
-			previousBestMappings[sf] = sfObj.mappingEntityId	# Recall previous mappings to make a comparison later.
 			for cm, cmObj in sfObj.candidates.items():
 				if cmObj.paScore > bestScore:
 					bestScore = cmObj.paScore
 					sfObj.mappingEntityId = cm
 
 		if self._debug: print( "... Done!" )
+
+
+	def _reReranking( self ):
+		"""
+		Compute R_s and R_m by summing and multiplying the initial and propagation scores of each candidate.
+		Then, select the highest ranked candidate such that its distance to the second place is the largest possible.
+		"""
+		if self._debug: print("[*] Re-ranking candidate mapping entities...")
+
+		for sf, sfObj in self._surfaceForms.items():
+			if len( sfObj.candidates ) == 1: continue				# Skip syrface forms with just one candidate mapping entity.
+
+			# Collect candidate initial and PA scores.
+			candidateScores: Dict[int, List[float]] = {}			# Each candidate has a pair with [isaScore, paScore].
+			totalIsaScore = 0
+			totalPaScore = 0
+			for cm, cmObj in sfObj.candidates.items():
+				candidateScores[cm] = [ cmObj.isaScore, cmObj.paScore ]
+				totalIsaScore += cmObj.isaScore
+				totalPaScore += cmObj.paScore
+
+			# Normalize initial and PA scores for sf's candidate mappings so that their sum is 1.
+			for cm in candidateScores:
+				candidateScores[cm][0] /= totalIsaScore
+				candidateScores[cm][1] /= totalPaScore
+
+			# Compute the R_s and R_m lists of scores.
+			rankedCandidates: Dict[int, List[float]] = {}			# Each candidate has a pair with [R_s(r_j), R_m(r_j)].
+			totalRsScore = 0										# For normalization of sums and products below per
+			totalRmScore = 0										# surface form.
+			for cm, cmObj in candidateScores.items():				# R_s = isaScore + paScore; R_m = isaScore * paScore.
+				rankedCandidates[cm] = [ cmObj[0] + cmObj[1], cmObj[0] * cmObj[1] ]
+				totalRsScore += rankedCandidates[cm][0]
+				totalRmScore += rankedCandidates[cm][1]
+
+			# Normalize Rs and Rm for surface forms' candidate mapping entities so that they sum up to one.
+			for cm in rankedCandidates:
+				rankedCandidates[cm][0] /= totalRsScore
+				rankedCandidates[cm][1] /= totalRmScore
+
+			# Find the first and second place candidates from each of the Rs and Rm ranks by sorting.
+			Rs = sorted( rankedCandidates, key=lambda x: rankedCandidates[x][0], reverse=True )
+			Rm = sorted( rankedCandidates, key=lambda x: rankedCandidates[x][1], reverse=True )
+
+			# Rerank based on distance between first and second place.  Choose the most discriminative criterion.
+			RsDiff = rankedCandidates[Rs[0]][0] - rankedCandidates[Rs[1]][0]
+			RmDiff = rankedCandidates[Rm[0]][1] - rankedCandidates[Rm[1]][1]
+			if RsDiff > RmDiff:
+				sfObj.mappingEntityId = Rs[0]
+			else:
+				sfObj.mappingEntityId = Rm[0]
+
+		if self._debug: print( "... Done!" )
+
 
 
 	def _chooseBestCandidate_NoTopicalCoherence( self ):
