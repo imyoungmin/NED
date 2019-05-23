@@ -427,7 +427,15 @@ class NED:
 
 					record2 = self._mEntity_ID.find_one( { "_id": r }, projection={ "e": True } )		# Consult DB to retrieve information for new entity into cache.
 					record3 = self._mSif_Documents.find_one( { "_id": r } )								# Extract words and frequencies in entity document.
-					vd = self._getRawDocumentEmbedding( record3["w"], record3["f"] )					# Get an initial document embedding (without common component removed).
+
+					# Get the initial document embedding from the DB. If it's not there, compute it and store it for fast, later computations.
+					if record3.get( "e" ) is not None:
+						vd = np.array( record3["e"] )
+					else:
+						vd = self._getRawDocumentEmbedding( record3["w"], record3["f"] )					# Compute an initial document embedding (without common
+						self._mSif_Documents.update_one( { "_id": r }, { "$set": { "e": vd.tolist() } } )	# component removed) and save it.
+						if self._debug: print( "    + Saved document embedding for entity", r, "[", record2["e"], "]" )
+
 					if not np.count_nonzero( vd ): continue		# Skip an entity with no doc embedding.
 
 					self._entityMap[r] = Entity( r, record2["e"], U, vd )
