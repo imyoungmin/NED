@@ -6,6 +6,8 @@ import sys
 from typing import Dict
 from multiprocessing import Pool
 import pymongo
+import numpy as np
+from typing import List
 from . import Parser as P
 importlib.reload( P )
 
@@ -15,6 +17,8 @@ class SIFParser( P.Parser ):
 	Parsing Wikipedia extracted archives to construct the SIF and the entity-id collections.
 	"""
 
+	A_SIF_PARAMETER = 0.001											# Parameter 'a' for SIF document embeddings.
+
 
 	def __init__( self ):
 		"""
@@ -22,9 +26,9 @@ class SIFParser( P.Parser ):
 		"""
 		P.Parser.__init__( self )
 
-		# Defining connections to collections for TFIDF.
-		self._mWord_Embeddings = self._mNED["word_embeddings"]		# {_id:str, e:[float1, float2,...], f:int}.
-		self._mSif_Documents = self._mNED["sif_documents"]			# {_id:int, w:[word1, word2,...], f:[int1, int2,...]}.
+		# Defining connections to collections for Smooth Inverse Frequency (SIF).
+		self._mWord_Embeddings: pymongo.collection.Collection = self._mNED["word_embeddings"]		# {_id:str, e:[float1, float2,...], f:int}.
+		self._mSif_Documents: pymongo.collection.Collection = self._mNED["sif_documents"]			# {_id:int, w:[word1, word2,...], f:[int1, int2,...], e:[float1, float2,...]}.
 
 		self._wordMap: Dict[str, bool] = {}							# Cache for words from word_embeddings collection.
 		self._loadWordMap()
@@ -110,9 +114,9 @@ class SIFParser( P.Parser ):
 						with bz2.open( fullFile, "rt", encoding="utf-8" ) as bz2File:
 							documents = self._extractWikiPagesFromBZ2( bz2File.readlines() )
 
-						# Use multithreading to tokenize each extracted document.
+						# Use multiprocessing to tokenize each extracted document.
 						pool = Pool()
-						documents = pool.map( P.Parser.tokenizeDoc, documents )	# Each document object in its own thread.
+						documents = pool.map( P.Parser.tokenizeDoc, documents )	# Each document object in its own process.
 						pool.close()
 						pool.join()												# Close pool and wait for work to finish.
 
@@ -220,6 +224,92 @@ class SIFParser( P.Parser ):
 			print( "[*]", totalRequests, "processed" )
 		endTime = time.time()
 		print( "[!] Done after", endTime - startTime, "secs." )
+
+
+	def saveSIFDocumentsRawEmbeddings( self, overwrite=False ):
+		"""
+		Store the initial document embeddings for all Wikipedia entity articles.
+		Execute this after you have saved the total word frequencies across the corpus.
+		The purpose of this function is to have the initial document embeddings handy when executing NED._getCandidatesForNamedEntity(.).
+		Eventually, when the "e" field of a SIF document is computed, the "w" and "f" fields may be dropped to save space.
+		:param overwrite: If true, all document embeddings will be re-computed and re-stored.  If false, it'll skip docs with embeddings already.
+		"""
+		totalStartTime = time.time()
+		print( "------- Computing initial (raw) SIF document embeddings -------" )
+
+		# Read total word frequencies.
+		with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
+			TOTAL_WORD_FREQ_COUNT = float( fIn.read() )
+		print( "Process initialized with", TOTAL_WORD_FREQ_COUNT, "total word frequency count" )
+
+		# Compute raw document embeddings, one by one.
+		batch: List[Dict[str, any]] = []
+		BATCH_SIZE = 10000
+		totalRequests = 0
+		for d in self._mSif_Documents.find():
+
+			if not overwrite and d.get( "e" ) is not None:
+				continue							# Skip documents for which we already computed the initial embedding.
+
+			batch.append( { "id": d["_id"], "words": d["w"], "freqs": d["f"], "TWFC": TOTAL_WORD_FREQ_COUNT } )
+			totalRequests += 1
+			if len( batch ) == BATCH_SIZE:			# Process a batch of documents in parallel.
+				startTime = time.time()
+				pool = Pool()
+				requests = pool.map( SIFParser._getRawDocumentEmbeddingUpdateObject, batch )	# Each document object in its own process.
+				pool.close()
+				pool.join()
+
+				self._mSif_Documents.bulk_write( requests )
+				print( "[*]", totalRequests, "processed in", time.time() - startTime, "secs." )
+				batch = []
+
+		if batch:
+			startTime = time.time()
+			pool = Pool()
+			requests = pool.map( SIFParser._getRawDocumentEmbeddingUpdateObject, batch )  		# Each document object in its own process.
+			pool.close()
+			pool.join()
+			self._mSif_Documents.bulk_write( requests )
+			print( "[*]", totalRequests, "processed after", time.time() - startTime, "secs." )
+
+		print( "[!] Done after", time.time() - totalStartTime, "secs." )
+
+
+	@staticmethod
+	def _getRawDocumentEmbeddingUpdateObject( d: Dict[str, any] ) -> pymongo.UpdateOne:
+		"""
+		Compute an initial document embedding from input words and respective frequencies.
+		:param d: A dictionary {"id":int, "words": List[str], "freqs": List[int], "TWFQ":float}
+		:return: \frac{1}{|d|} \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
+		"""
+
+		# To parallelize the raw document embedding computation we need a db connection per process.
+		mClient: pymongo.MongoClient = pymongo.MongoClient( "mongodb://localhost:27017/" )
+		mNED = mClient.ned
+		mWord_Embeddings: pymongo.collection.Collection = mNED["word_embeddings"]
+
+		vd = np.zeros( 300 )
+
+		totalFreq = 0.0										# Count freqs of effective words in document for normalization.
+		for i, w in enumerate( d["words"] ):
+			f = d["freqs"][i]
+			r = mWord_Embeddings.find_one( { "_id": w } )
+			if r is None: continue							# Skip words not in the vocabulary.
+
+			vw = np.array( r["e"] )							# Word embedding and probability.
+			p = r["f"] / d["TWFC"]							# Divide by the total word frequency count (across all corpus).
+
+			# \frac{1}{|d|} \sum_{w \in d}( \frac{a}{a + p(w)}v_w )
+			vd += f * SIFParser.A_SIF_PARAMETER / ( SIFParser.A_SIF_PARAMETER + p ) * vw
+			totalFreq += f
+
+		if totalFreq > 0:
+			vd /= totalFreq		# Still need to subtract proj onto first singular vector (i.e. common discourse vector).
+
+		mClient.close()
+		# print( "   Done with", d["id"] )
+		return pymongo.UpdateOne( { "_id": d["id"] }, { "$set": { "e": vd.tolist() } } )
 
 
 	def saveTotalWordCount( self ):

@@ -5,6 +5,10 @@ import numpy as np
 from sklearn.decomposition import TruncatedSVD
 from multiprocessing import Value
 from scipy import sparse
+from WikiParser import SIFParser as S
+import importlib
+
+importlib.reload( S )
 
 
 class Entity:
@@ -94,15 +98,15 @@ class NED:
 		# MongoDB connections.
 		self._mClient: pymongo.mongo_client = pymongo.MongoClient( "mongodb://localhost:27017/" )
 		self._mNED = self._mClient["ned"]
-		self._mEntity_ID: pymongo.collection = self._mNED["entity_id"]  			# {_id:int, e:str, e_l:str}.
+		self._mEntity_ID: pymongo.collection.Collection = self._mNED["entity_id"]  				# {_id:int, e:str, e_l:str}.
 
 		# Connections to SIF collections.
-		self._mWord_Embeddings: pymongo.collection = self._mNED["word_embeddings"] 	# {_id:str, e:List[float], f:int}
-		self._mSif_Documents: pymongo.collection = self._mNED["sif_documents"]		# {_id:int, w:List[str], f:List[int]}
+		self._mWord_Embeddings: pymongo.collection.Collection = self._mNED["word_embeddings"] 	# {_id:str, e:List[float], f:int}
+		self._mSif_Documents: pymongo.collection.Collection = self._mNED["sif_documents"]		# {_id:int, w:List[str], f:List[int], e:List[float]}
 
 		# Defining connections to collections for entity disambiguation.
-		self._mNed_Dictionary: pymongo.collection = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
-		self._mNed_Linking: pymongo.collection = self._mNED["ned_linking"]  		# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
+		self._mNed_Dictionary: pymongo.collection.Collection = self._mNED["ned_dictionary"]  	# {_id:str, m:{"e_1":int, "e_2":int,..., "e_n":int}}. -- m stands for "mapping".
+		self._mNed_Linking: pymongo.collection.Collection = self._mNED["ned_linking"]  			# {_id:int, f:{"e_1":true, "e_2":true,..., "e_3":true}}. -- f stands for "from".
 
 		# Retrieve shared static constants if they haven't been loaded.
 		with NED._WP.get_lock():
@@ -112,14 +116,15 @@ class NED:
 				NED._LOG_WP.value = np.log( NED._WP.value )							# Log used in topic relatedness metric.
 				print( "NED initialized with", NED._WP.value, "entities" )
 
-				# Read total word frequencies and initialize map of word objects.
+				# Read total word frequencies.
 				with open( "Datasets/wordcount.txt", "r", encoding="utf-8" ) as fIn:
 					NED._TOTAL_WORD_FREQ_COUNT.value = float( fIn.read() )
 				print( "NED initialized with", NED._TOTAL_WORD_FREQ_COUNT.value, "total word frequency count" )
 
+		# Initialize map of word objects.
 		self._wordMap: Dict[str, Word] = {}
 
-		self._a = 0.001																# Parameter 'a' for SIF.
+		self._a = S.SIFParser.A_SIF_PARAMETER										# Parameter 'a' for SIF.
 
 		# Initialize map of entities (as a cache).
 		self._entityMap: Dict[int, Entity] = {}

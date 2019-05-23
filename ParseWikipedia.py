@@ -19,9 +19,10 @@ if __name__ is "__main__":
 	# sifParser.buildWordEmbeddings( _WORD_EMBEDDINGS )
 	# sifParser.buildSIFDocuments( _Extracted_XML )
 	# sifParser.saveTotalWordCount()
+	# sifParser.saveSIFDocumentsRawEmbeddings()
 
 	# Compute surface forms and fill collections for NED.
-	nedParser = NP.NEDParser()
+	# nedParser = NP.NEDParser()
 	# nedParser.initDBCollections()
 	# nedParser.parseSFFromEntityNames()
 	# nedParser.parseSFsAndLsFromWikilinks( _Extracted_XML )
