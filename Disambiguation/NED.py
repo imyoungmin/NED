@@ -131,7 +131,7 @@ class NED:
 
 		# Named entities map {"namedEntity1": NamedEntity1, "namedEntity2": NamedEntity2, ...}.
 		self._surfaceForms: Dict[str, SurfaceForm] = {}
-		self._WINDOW_SIZE = 20
+		self._WINDOW_SIZE = 50
 
 		# Initial score constants.
 		self._alpha = 0.4
