@@ -185,6 +185,7 @@ class NED:
 		if self._surfaceForms:
 			self._removeCommonDiscourseEmbedding()	# Remove projection onto first singular vector (i.e. common discourse vector).
 			self._computeContextSimilarity() 		# Compute context similary of surface forms' BOW with respect to candidates mapping entities.
+			self._removeIncompatibleCandidates()	# Discard candidates that are not relevant to their local context and keep only the top X list.
 
 			# Get an initial score for candidate mapping entities.
 			self._chooseBestCandidate_NoTopicalCoherence()
@@ -398,6 +399,27 @@ class NED:
 		if self._debug: print( "... Done!" )
 
 
+	def _removeIncompatibleCandidates( self ):
+		"""
+		Keep only the top X context-compatible candidates for each surface form.
+		"""
+		KEEP_TOP = 120											# We'll keep these number of candidates, at most, for each surface form.
+		if self._debug: print( "[*] Removing incompatible candidates for named entity mentions" )
+
+		for sf, sfObj in self._surfaceForms.items():
+			candidateList: List[Tuple[int, float]] = [ (c, cObj.contextSimilarity) for c, cObj in sfObj.candidates.items() ]
+
+			if len( candidateList ) <= KEEP_TOP: continue
+
+			sortedCandidateList = sorted( candidateList, key=lambda x: x[1], reverse=True )
+
+			# Remove incompatible candidates.
+			for i in range( KEEP_TOP, len( candidateList ) ):
+				del sfObj.candidates[sortedCandidateList[i][0]]
+
+		if self._debug: print( "... Done!" )
+
+
 	def _getCandidatesForNamedEntity( self, m_i: str ) -> Dict[int, Candidate]:
 		"""
 		Retrieve candidate mapping entities for given named entity.
@@ -416,7 +438,7 @@ class NED:
 			for r_j in record1["m"]:
 				r = int( r_j )
 
-				if skipOneCounters and record1["m"][r_j] == 1:
+				if skipOneCounters and record1["m"][r_j] <= 4:
 					oneCounters += 1
 					continue
 
