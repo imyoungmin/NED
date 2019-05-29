@@ -1,6 +1,7 @@
 import pymongo
 from typing import Set, Dict, Tuple, List
 import sys
+import csv
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
 from multiprocessing import Value
@@ -210,6 +211,37 @@ class NED:
 			if self._debug: print( "[x] Nothing to compute!  No valid surface forms collected!", sys.stderr )
 
 		return result
+
+
+	def saveData( self ):
+		"""
+		Save surface forms and candidates information.
+		Export indexToSFC list.
+		"""
+		if self._debug: print( ">> Saving data to files..." )
+		with open( "Output/sfcOutput.csv", "w", encoding="utf-8", newline="" ) as csvFile:
+			fieldNames = ["SurfaceForm", "Candidate", "Count", "ContextSimilarity", "InitialScore", "FinalScore"]
+			writer = csv.DictWriter( csvFile, fieldnames=fieldNames )
+			writer.writeheader()
+
+			for sf, sfObj in self._surfaceForms.items():
+				for cm, cmObj in sfObj.candidates.items():
+					writer.writerow( { "SurfaceForm": sf,
+									   "Candidate": str(cm) + ": " + self._entityMap[cm].name,
+									   "Count": cmObj.count,
+									   "ContextSimilarity": cmObj.contextSimilarity,
+									   "InitialScore": cmObj.isaScore,
+									   "FinalScore": cmObj.paScore } )
+
+		with open( "Output/indextToSFC.csv", "w", encoding="utf-8", newline="" ) as csvFile:
+			fieldNames = ["SurfaceForm", "Candidate"]
+			writer = csv.DictWriter( csvFile, fieldnames=fieldNames )
+			writer.writeheader()
+
+			for t in self._indexToSFC:
+				writer.writerow( { "SurfaceForm": t[0], "Candidate": t[1] } )
+
+		if self._debug: print( "Done!" )
 
 
 	def _assignCandidatesInitialScore( self ) -> np.ndarray:
