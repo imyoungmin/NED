@@ -7,5 +7,5 @@ importlib.reload( T )
 results = T.Task.disambiguateTextFile( "Datasets/madonna.txt" )
 
 # Disambiguating entities in a big dataset to measure accuracy.
-# T.Task.debug = False
+# T.Task.debug = False			# Avoid dumping all process info to the console.
 # T.Task.evaluateAccuracy( "Datasets/AIDA-YAGO2-dataset.tsv" )

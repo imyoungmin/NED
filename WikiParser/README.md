@@ -56,7 +56,7 @@ minute to compute.
 ### 2. Compiling disambiguation collections
 
 Now, we'll build the surface forms dictionary, `ned_dictionary`, and the linking collection, `ned_linking`.
-For this, comment out anything related to SIF computation from previous step (we don't want to erase
+For this task comment out anything related to SIF computation from previous step (we don't want to erase
 any currently loaded data in the SIF collections!).  Then, execute the following commands:
 ```
 nedParser = NP.NEDParser()
@@ -68,7 +68,7 @@ where the last line may be executed as many times as directories you have splite
 `*.bz2` archives.  Whenever you need to re-execute the latter, recall to comment out `nedParser.initDBCollections()`
 and `nedParser.parseSFFromEntityNames()` --i.e., these two commands should be executed once!
 
-Finally, after the previous compilation is complete, proceed to only execute the following line:
+Finally, after the previous compilation is complete, proceed to execute only the following line:
 ```
 nedParser.parseSFFromRedirectPages( _Multistream_Index, _Multistream_Dump )
 ```
