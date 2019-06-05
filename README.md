@@ -6,7 +6,7 @@ By Luis Ángel (c) June, 2019.
 
 ## Introduction ##
 
-We present a proposed method to solve the problem of **Named Entity Disambiguation**.  Our approach is based on
+We present a method to solve the problem of **Named Entity Disambiguation**.  Our approach is based on
 the foundations provided in the following research papers:
 - _Graph Ranking for Collective Named Entity Disambiguation_, by Alhelbawy, A., and Gaizauskas, R. 2014.
 - _Linking Named Entities in Tweets with Knowledge Base via User Interest Modeling_, by Shen, W., Wang, J., 
@@ -26,8 +26,8 @@ stages:
 1. Processing Wikipedia and word embeddings to generate the DB collections.  The steps for this long task are
 well documented in the corresponding README file under the WikiParser directory.  We refer the reader to that
 location for further details before attempting anything in step 2.
-2. Evaluation of our method on an input text file or on the **CoNLL 2003 Reuter's Newswire Dataset** for the NER
-recognition task (https://www.clips.uantwerpen.be/conll2003/ner/).  This step if further described below.
+2. Evaluation of our method on an input text file or on the **CoNLL 2003 Reuter's Newswire Dataset** for the NER 
+task (https://www.clips.uantwerpen.be/conll2003/ner/).  This step is further described below.
 
 ## Disambiguating Entities ##
 
